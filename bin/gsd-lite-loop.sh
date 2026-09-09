@@ -13,10 +13,12 @@
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
 #                              kill し、進捗なし→リトライ経路に乗せる）
 #
-# 状態管理の原則: 信頼するのは「コミット済みの state」だけ。異常終了 (rc != 0) した
-# ターンの作業ツリー上の state は HEAD から復元し、コミットまで到達していたかどうかで
-# 進捗を判定する。リトライ回数は実行時情報なので追跡対象外（logs/.retry）に置き、
-# ループ自身がターン境界の作業ツリーを汚さない。
+# 状態管理の原則: 信頼するのは「コミット済みの state」だけ。進捗判定は rc に依らず
+# HEAD の state で行い、各ターンの後に作業ツリーの state を HEAD へ正規化する
+# （「state は書いたがコミットしなかった」ターンを成功扱いしない）。ループ自身が
+# 書く auto-BLOCKED もコミットする。リトライ回数は実行時情報なので追跡対象外
+# （logs/.retry）に置く。人間が再開のために state を編集した場合も、必ずコミット
+# してから起動すること（未コミットの編集はターン失敗時に巻き戻る）。
 #
 # 終了コード: 0=DONE / 2=BLOCKED / 3=max_turns / 4=discuss未完了 / 5=state異常 / 6=前提エラー
 
@@ -43,9 +45,13 @@ supdate() { # supdate '<jq filter>' — state.json をインプレース更新
 get_retry() { cat "$RETRYFILE" 2>/dev/null || echo 0; }
 set_retry() { echo "$1" > "$RETRYFILE"; }
 
-run_hook() { # run_hook <name> <args...> — フックの失敗は無視
+run_hook() { # run_hook <name> <args...> — フックの失敗は無視。ロック FD は継承させない
   local hook="$GSD_DIR/hooks/$1"; shift
-  [ -x "$hook" ] && "$hook" "$@" || true
+  [ -x "$hook" ] && "$hook" "$@" 9>&- || true
+}
+
+committed_state() { # コミット済み (HEAD) の state から値を読む
+  git show "HEAD:$STATE" 2>/dev/null | jq -r "$1"
 }
 
 finish() { # finish <exit_code> — on-exit フックを呼んで終了
@@ -94,6 +100,10 @@ command -v flock >/dev/null || die "flock (util-linux) is required"
 command -v "$CLAUDE_BIN" >/dev/null || die "claude binary not found: $CLAUDE_BIN"
 [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first, from the project root)"
 git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository"
+git show "HEAD:$STATE" >/dev/null 2>&1 || die "$STATE is not committed (commit it first — the loop trusts committed state only)"
+if ! git diff --quiet -- "$STATE" 2>/dev/null; then
+  echo "gsd-lite: WARN state.json has uncommitted changes — 再開のための編集はコミットしてから起動してください（ターン失敗時に巻き戻ります）" >&2
+fi
 
 mkdir -p "$GSD_DIR/logs"
 
@@ -138,21 +148,20 @@ while true; do
     "$CLAUDE_BIN" -p "$cmd" \
     ${model:+--model "$model"} \
     --permission-mode "$PERMISSION_MODE" \
-    > "$log" 2>&1
+    > "$log" 2>&1 9>&-
   rc=$?
 
-  if [ "$rc" -ne 0 ]; then
-    # kill / タイムアウト / 異常終了したターンの作業ツリー state は信頼しない。
-    # コミット済み (HEAD) の state に戻し、コミットまで到達していたかで進捗を判定する
-    echo "gsd-lite: turn exited rc=$rc — restoring committed state (see $log)" >&2
-    git checkout HEAD -- "$STATE" 2>/dev/null || true
-  fi
+  # 進捗判定は rc に依らず「コミット済み (HEAD) の state」で行う。
+  # 正常終了でも commit まで到達していなければ成功と認めない
+  turn_after=$(committed_state '.turn')
+  [ -n "$turn_after" ] || die "cannot read committed state (HEAD:$STATE)"
+  # ターン境界の正規化: 作業ツリーの state を HEAD に揃える（未コミットの書きかけを残さない）
+  git checkout HEAD -- "$STATE" || die "failed to restore $STATE from HEAD"
 
-  # ターンの生存確認: （コミット済みの）turn が進んでいなければ進捗なし
-  turn_after=$(sget '.turn')
   if [ "$turn_after" -le "$turn_before" ]; then
     retry=$((retry + 1))
     retry_max=$(sget '.retry_max')
+    echo "gsd-lite: no committed progress (rc=$rc, attempt $retry/$((retry_max + 1))) — see $log" >&2
     if [ "$retry" -gt "$retry_max" ]; then
       echo "gsd-lite: turn made no progress after $retry attempts — auto-BLOCKED" >&2
       supdate '.next_command = "BLOCKED" | .phase = "blocked"'
@@ -162,6 +171,8 @@ while true; do
         echo "ループが自動生成した BLOCKED です。ターンが state.json を（コミットまで含めて）"
         echo "更新せずに $retry 回連続で終了しました。最後のログ: $log"
       } > "$GSD_DIR/BLOCKED.md"
+      git add "$STATE" "$GSD_DIR/BLOCKED.md" 2>/dev/null && \
+        git commit -qm "gsd-lite(loop): auto-BLOCKED (no progress after $retry attempts)" || true
       finish 2
     fi
     set_retry "$retry"

@@ -66,12 +66,20 @@ cat > "$TESTROOT/bin/claude-noop" <<'EOF'
 #!/usr/bin/env bash
 echo "noop"
 EOF
-# ---- スタブ 3: 即 BLOCKED を書く（rc=0 なので未コミットでも信頼される）----
+# ---- スタブ 3: BLOCKED を書いてコミットする（実スキルの契約どおり）----
 cat > "$TESTROOT/bin/claude-blocker" <<'EOF'
 #!/usr/bin/env bash
 STATE=.gsd-lite/state.json
 t=$(mktemp); jq '.turn+=1 | .next_command="BLOCKED" | .phase="blocked"' "$STATE" > "$t" && mv "$t" "$STATE"
 echo "need human" > .gsd-lite/BLOCKED.md
+git add -A >/dev/null && git commit -qm "stub blocked"
+EOF
+# ---- スタブ 3b: rc=0 だが state をコミットしない → 進捗と認めない期待 ----
+cat > "$TESTROOT/bin/claude-ok-nocommit" <<'EOF'
+#!/usr/bin/env bash
+STATE=.gsd-lite/state.json
+t=$(mktemp); jq '.turn+=1 | .phase="done" | .next_command="DONE"' "$STATE" > "$t" && mv "$t" "$STATE"
+exit 0
 EOF
 # ---- スタブ 4: state を進めるがコミットせず rc=1 → 進捗と認めない期待 ----
 cat > "$TESTROOT/bin/claude-fail-nocommit" <<'EOF'
@@ -110,6 +118,7 @@ GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-noop" "$LOOP" > "$TESTROOT/loop-out.lo
 assert_eq "exit code 2 (BLOCKED)" "$?" "2"
 assert_eq "state is BLOCKED" "$(jq -r .next_command .gsd-lite/state.json)" "BLOCKED"
 grep -q "auto" .gsd-lite/BLOCKED.md && ok "BLOCKED.md auto-written" || ng "BLOCKED.md missing"
+assert_eq "auto-BLOCKED is committed" "$(git show HEAD:.gsd-lite/state.json | jq -r .next_command)" "BLOCKED"
 assert_eq "attempts logged" "$(ls .gsd-lite/logs/toy/turn-001-attempt*.log | wc -l)" "3"
 assert_eq "exit hook code=2" "$(grep -c 'exit code=2' .gsd-lite/hooks.log)" "1"
 
@@ -140,6 +149,12 @@ assert_eq "no turn logs written" "$(ls .gsd-lite/logs/toy/turn-*.log 2>/dev/null
 t=$(mktemp); jq '.next_command="DONE" | .phase="done"' .gsd-lite/state.json > "$t" && mv "$t" .gsd-lite/state.json
 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
 assert_eq "DONE wins over max_turns (exit 0)" "$?" "0"
+
+echo "== Test 7b2: rc=0 でも未コミットの DONE は信頼しない =="
+make_project "$TESTROOT/p7c"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-ok-nocommit" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "uncommitted DONE + rc=0 -> auto-BLOCKED (exit 2)" "$?" "2"
+assert_eq "working state normalized then auto-BLOCKED" "$(jq -r .next_command .gsd-lite/state.json)" "BLOCKED"
 
 echo "== Test 7: rc!=0 はコミット済み state だけを信頼する =="
 make_project "$TESTROOT/p7a"

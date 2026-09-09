@@ -215,8 +215,12 @@ gsd-lite/
 AskUserQuestion（AUQ）で実装したもの。原典の「番号付き質問+推奨回答の Markdown」を、
 選択式 UI に置き換えてユーザーの回答コストを下げる。
 
-**a-0. ブランチ整理と前回マイルストーンの退避（この順で）**
+**a-0. 進行中チェック → ブランチ整理 → 退避（この順で）**
 
+0. **進行中チェック（ブランチを動かす前に）**: 現在の state の `phase` が
+   `done` / `discuss` 以外なら進行中のマイルストーンがある。checkout も退避もせず
+   ユーザーに状況を確認する（先に checkout すると移動先の古い state を見て
+   進行中を見逃す）
 1. **ブランチ整理**: いま前回の作業ブランチ（`gsd-lite/*`）にいる場合（前回がリモート
    運用で MR 待ちのケース）は state の `branch.base` へ戻る。リモートがあれば
    `git pull --ff-only` で base を最新化し、前回 MR が未マージなら AUQ で
@@ -363,6 +367,8 @@ PLAN.md のタスク形式:
      ターゲットは `branch.base`。本文に受け入れ基準の達成状況と VERIFICATION 要約）。
      作成成功で URL を VERIFICATION.md / PROGRESS.md に記録し
      `phase: "done"` / `next_command: "DONE"`（**マージは人間 / CI に委ねる**）。
+     **push の成否は毎回確認**し、失敗時は 1 回リトライのうえ DONE にせず BLOCKED を
+     追記コミットする（ローカル DONE でもリモート未達を成功にしない）。
      最終 state をコミットして再 push し、**マイルストーンブランチに残ったまま終了する**
      （checkout でベースに移ると作業ツリーの state がベースの古い内容に置き換わり、
      ループが誤動作する。ベースへの復帰は次の discuss の冒頭 0-a が行う: 作業ブランチ上に
@@ -422,10 +428,16 @@ done
   リトライ上限後は自動で BLOCKED に落とす
 - **ターンのタイムアウト**: `timeout`（`GSD_LITE_TURN_TIMEOUT` 秒、デフォルト 3600）で
   各ターンを包む。ハングしたターンは kill され「進捗なし」としてリトライ経路に乗る
-- **信頼するのはコミット済み state のみ**: ターンが異常終了（rc != 0 — kill・タイムアウト・
-  クラッシュ）した場合、作業ツリーの state.json は `git checkout HEAD --` で HEAD から
-  復元してから進捗を判定する。「state は更新したがコミット前に死んだ」ターンを
-  成功扱いしない（コミットまで到達していれば進捗と認め、警告だけ出す）
+- **信頼するのはコミット済み state のみ（rc に依らず）**: 進捗判定は常に HEAD の
+  state の `turn` で行い、各ターン後に作業ツリーの state を `git checkout HEAD --` で
+  正規化する。「state は書いたがコミットしなかった」ターンは rc=0 でも成功扱いしない。
+  コミット済みで進捗しつつ rc != 0 の場合（push 等の後処理失敗の可能性）は警告を出して
+  続行する — push 中に kill されたケースの残留リスクは WARN ログで許容（§10 #16）。
+  ループ自身が書く auto-BLOCKED もコミットする。起動時に state が未コミットなら
+  警告（HEAD に state が無い場合は起動拒否）
+- **フック・ターンにロック FD を継承させない**: on-exit / on-phase フックと claude の
+  起動時に FD 9 を閉じる（フックが残したバックグラウンド子がロックを握り続け、
+  停止表示なのに再起動拒否になる事故を防ぐ）
 - **依存チェック**: 起動前に `jq` / `timeout` / `flock` / claude バイナリの存在を確認し、
   欠けていれば終了コード 6 で即停止する（誤った理由での BLOCKED を防ぐ）
 - 全ターンの標準出力を **`logs/<milestone>/`** に保存（マイルストーン別に分け、
@@ -467,7 +479,9 @@ done
 2. `next_command: "BLOCKED"` → loop.sh が exit 2 で停止
 3. 人間が対話セッションで `BLOCKED.md` を確認し、判断を `REQUIREMENTS.md` なり
    `PLAN.md` なりに反映（この作業自体を補助する `/gsd-lite-resume` は v2 候補）
-4. `next_command` を適切なフェーズコマンドに書き戻し、loop.sh を再起動
+4. `next_command` を適切なフェーズコマンドに書き戻し、**変更を必ずコミットしてから**
+   loop.sh を再起動する（ループはコミット済み state を正とするため、未コミットの
+   再開編集は最初のターン失敗時に HEAD へ巻き戻される）
 
 ## 10. 決定事項ログ（2026-09-09 ユーザーレビューで確定）
 
@@ -488,6 +502,7 @@ done
 | 13 | 進捗監視 | **3 層すべて v1 に入れる**: `--status` サブコマンド（プル・トークンゼロ）/ `on-phase` フック（プッシュ通知）/ 監視サブエージェント（セッション内、フェーズ変化時のみ 1 行報告）。禁止されるのはターン毎のログ全文ポーリングのみ |
 | 14 | Codex 敵対的レビュー反映（2026-09-09） | **7 件の指摘をすべて修正**: state 更新→commit の順序統一 / リモート運用の base 汚染防止（verify の base 復帰 + discuss の base pull と MR 未マージ確認）/ allowlist に push・gh・glab 追加 / max_turns の実行前判定 / ターンの timeout / pid の原子的取得 / マイルストーン別ログ |
 | 15 | Codex 敵対的レビュー第 2 ラウンド反映（2026-09-09） | **回帰 2 件を含む 7 件を修正**: verify の base 復帰を撤回（復帰は次回 discuss 冒頭 0-a へ移動）/「信頼するのはコミット済み state のみ」原則（rc!=0 は HEAD から復元して判定）/ 排他を flock に置換 / retry を追跡対象外 logs/.retry へ分離 / discuss の遷移をコミットに内包 / init に既存プロジェクト更新モード / timeout・flock の依存チェック。テストはコミットする実 git スタブに刷新（27 assert） |
+| 16 | Codex 敵対的レビュー第 3 ラウンド反映（2026-09-09） | **5 件を修正**: 進捗判定を rc 非依存の「コミット済み state のみ」に強化（rc=0 の未コミット DONE も不採用、毎ターン境界で state を HEAD に正規化、auto-BLOCKED もコミット）/ verify は push 成否を確認し失敗なら BLOCKED を追記コミット（push 中 kill の残留リスクは WARN で許容と明記）/ discuss は checkout 前に進行中チェック / フック・ターンにロック FD (9) を継承させない / 再開手順に「コミットしてから再起動」を必須化。テスト 30 assert |
 
 ## 11. 利用手順（ユーザー視点のウォークスルー）
 
@@ -559,7 +574,7 @@ setsid gsd-lite-loop.sh > .gsd-lite/logs/loop.log 2>&1 &
 | exit | 意味 | ユーザーがやること |
 |---|---|---|
 | 0 | DONE | ローカルのみ: ベースブランチにマージ済み / リモートあり: MR/PR 作成済み（URL は `VERIFICATION.md`）。成果を確認して終わり |
-| 2 | BLOCKED | `BLOCKED.md` を読む → 対話セッションで判断を REQUIREMENTS/PLAN に反映 → `next_command` を戻す → loop.sh 再実行 |
+| 2 | BLOCKED | `BLOCKED.md` を読む → 対話セッションで判断を REQUIREMENTS/PLAN に反映 → `next_command` を戻す → **コミットしてから** loop.sh 再実行 |
 | 3 | max_turns | 進捗と PLAN を確認し、必要なら max_turns を増やして再実行 |
 | 4 | discuss 未完了 | 対話セッションで /gsd-lite-discuss を先に実行 |
 

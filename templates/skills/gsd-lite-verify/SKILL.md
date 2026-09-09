@@ -46,6 +46,11 @@ disable-model-invocation: true
      末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)` を付ける
    - 作成成功: MR/PR の URL を VERIFICATION.md と PROGRESS.md に記録。
      ブランチはそのまま。`phase: "done"` / `next_command: "DONE"`（マージは人間 / CI）
+   - **push の成否を必ず確認する**（MR 用 push・最終 state コミット後の再 push とも）。
+     失敗したら 1 回だけリトライし、それでも失敗なら DONE のまま終わらせず、
+     `next_command: "BLOCKED"` / `phase: "blocked"` に更新して失敗内容を BLOCKED.md に
+     書き**追加コミット**して終了する（ローカルが DONE 相当でも、リモートに最終 state が
+     届いていない状態を成功にしない）
    - push はできたが MR/PR 作成に失敗（CLI 不在・未認証・ホスト不明など）:
      push 済みであることと失敗理由・手動作成の手順を BLOCKED.md に書いて BLOCKED にする
    - push 自体が失敗: 理由を BLOCKED.md に書いて BLOCKED にする
