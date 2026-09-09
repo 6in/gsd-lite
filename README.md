@@ -37,3 +37,14 @@ gsd-lite-loop.sh --status
 終了コード: 0=DONE（ローカル: マージ済み / リモート: MR 作成済み）/ 2=BLOCKED（`.gsd-lite/BLOCKED.md` 参照）/
 3=max_turns / 4=discuss 未完了。通知が欲しければ `.gsd-lite/hooks/on-exit.sh` と
 `on-phase.sh` に書く。
+
+## リモート運用（MR/PR の作成手段）
+
+`origin` があるプロジェクトでは、verify 合格時にローカルマージせず
+**push + MR/PR 作成**で DONE になる（マージは人間 / CI に委ねる）:
+
+- **GitHub**: `gh pr create`。事前にマシンごとに一度 `gh auth login` が必要
+- **GitLab**: `glab mr create`（要 `glab auth login`）。**`glab` がなくても**
+  push オプション `-o merge_request.create -o merge_request.target=<base>` で
+  MR を作成する（GitLab サーバー側機能・追加ツール不要）
+- CLI 不在・未認証などで作成できないときは push まで行って BLOCKED（人間が作る）
