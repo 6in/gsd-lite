@@ -343,6 +343,8 @@ PLAN.md のタスク形式:
      `phase: "done"` / `next_command: "DONE"` で終了
    - **リモートあり**: ローカルマージはせず `git push -u origin gsd-lite/<slug>` して
      **MR/PR を作成**する（github.com → `gh pr create`、gitlab → `glab mr create`、
+     glab 不在時は push オプション `-o merge_request.create -o merge_request.target=...`
+     でフォールバック（GitLab サーバー側機能・追加ツール不要）、
      ターゲットは `branch.base`。本文に受け入れ基準の達成状況と VERIFICATION 要約）。
      作成成功で URL を VERIFICATION.md / PROGRESS.md に記録し
      `phase: "done"` / `next_command: "DONE"`（**マージは人間 / CI に委ねる**）。

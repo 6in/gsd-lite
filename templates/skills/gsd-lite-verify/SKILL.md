@@ -31,10 +31,17 @@ disable-model-invocation: true
    - マージ成功: ブランチは削除せず残す。`phase: "done"` / `next_command: "DONE"`
 
    **(b) リモートあり → push + MR/PR 作成（ローカルマージはしない）**
-   - `git push -u origin gsd-lite/<slug>`
-   - origin の URL からホストを判別して MR/PR を作成:
-     - github.com → `gh pr create --base <branch.base> --title "<milestone の要約>" --body "..."`
-     - gitlab を含む → `glab mr create --target-branch <branch.base> --title "..." --description "..."`
+   - origin の URL からホストを判別し、ホスト別の手順で作成する:
+     - **github.com**: `git push -u origin gsd-lite/<slug>` →
+       `gh pr create --base <branch.base> --title "<milestone の要約>" --body "..."`
+       （`gh` が必須。不在・未認証なら push まで行って BLOCKED）
+     - **gitlab を含む**: `glab` が使えるなら `git push -u origin gsd-lite/<slug>` →
+       `glab mr create --target-branch <branch.base> --title "..." --description "..."`。
+       **`glab` が不在なら push オプションでフォールバック**（GitLab サーバー側機能。
+       追加ツール・API トークン不要）:
+       `git push -u origin gsd-lite/<slug> -o merge_request.create
+        -o merge_request.target=<branch.base> -o merge_request.title="<要約>"`
+       — push 出力に MR の URL が表示されるのでそれを記録する
    - MR/PR の本文には受け入れ基準の達成状況と VERIFICATION.md の要約を書き、
      末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)` を付ける
    - 作成成功: MR/PR の URL を VERIFICATION.md と PROGRESS.md に記録。
