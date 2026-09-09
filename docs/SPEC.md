@@ -149,7 +149,6 @@ gsd-lite/
   },
   "turn": 12,
   "max_turns": 60,
-  "retry": 0,
   "retry_max": 2,
   "verify_round": 0,
   "verify_round_max": 2,
@@ -178,6 +177,8 @@ gsd-lite/
   - `BLOCKED`: 人間の判断待ち
 - `turn`: **各ターンの Claude が終了時に必ずインクリメント**する。loop.sh はこれで
   「ターンが実際に仕事をしたか」を検知する（§7）
+- リトライ回数は state に持たない（実行時情報のため）。loop.sh が追跡対象外の
+  `logs/.retry` で管理し、ループ自身がターン境界の作業ツリーを汚さないようにする
 - タスクの進捗（何番目まで完了か）は state に持たず **PLAN.md のチェックボックスが正**。
   二重管理を避ける
 
@@ -200,6 +201,10 @@ gsd-lite/
 2. `.gsd-lite/state.json` を生成（`phase: "discuss"` / `next_command: "DISCUSS"`）
 3. 初回コミット後、「次は同じセッションで /gsd-lite-discuss」と案内して終了
    （そのまま同一セッションで discuss に続けてよい）
+4. **既にセットアップ済みのプロジェクトで再実行された場合は「更新モード」**:
+   AUQ で確認のうえ `.claude/skills/gsd-lite-*` と allowlist を最新テンプレートで
+   更新する（`.gsd-lite/` には触れない）。gsd-lite 本体の更新を配布済み
+   プロジェクトに反映する正規手順はこれ（install.sh はテンプレートまでしか届かない）
 
 ### /gsd-lite-discuss（対話セッションで実行・ループからは実行しない）
 
@@ -210,10 +215,15 @@ gsd-lite/
 AskUserQuestion（AUQ）で実装したもの。原典の「番号付き質問+推奨回答の Markdown」を、
 選択式 UI に置き換えてユーザーの回答コストを下げる。
 
-**a-0. 前回マイルストーンの退避**
+**a-0. ブランチ整理と前回マイルストーンの退避（この順で）**
 
-`.gsd-lite/` に完了済みマイルストーン（`phase: "done"`）の成果物が残っていれば、
-`.gsd-lite/archive/<前回slug>/` へ退避してから開始する（state.json は新規作成し直す）。
+1. **ブランチ整理**: いま前回の作業ブランチ（`gsd-lite/*`）にいる場合（前回がリモート
+   運用で MR 待ちのケース）は state の `branch.base` へ戻る。リモートがあれば
+   `git pull --ff-only` で base を最新化し、前回 MR が未マージなら AUQ で
+   「待つ / そのまま進める」を確認する
+2. **退避**: `.gsd-lite/` に完了済みマイルストーン（`phase: "done"`）の成果物が
+   残っていれば、`.gsd-lite/archive/<前回slug>/` へ退避してから開始する
+   （state.json は新規作成し直す）
 
 **a. デザインツリーとフロンティア**
 
@@ -353,9 +363,10 @@ PLAN.md のタスク形式:
      ターゲットは `branch.base`。本文に受け入れ基準の達成状況と VERIFICATION 要約）。
      作成成功で URL を VERIFICATION.md / PROGRESS.md に記録し
      `phase: "done"` / `next_command: "DONE"`（**マージは人間 / CI に委ねる**）。
-     最終 state をコミットして再 push したのち **`git checkout <branch.base>` で
-     ベースブランチに戻って終了する**（作業ブランチに残ると次のマイルストーンが
-     このブランチを base にしてしまうため）。
+     最終 state をコミットして再 push し、**マイルストーンブランチに残ったまま終了する**
+     （checkout でベースに移ると作業ツリーの state がベースの古い内容に置き換わり、
+     ループが誤動作する。ベースへの復帰は次の discuss の冒頭 0-a が行う: 作業ブランチ上に
+     いたら `branch.base` へ戻り、リモートがあれば pull、前回 MR 未マージなら AUQ で確認）。
      CLI 不在・未認証・ホスト不明・push 失敗は状況を BLOCKED.md に書いて BLOCKED
 3. **指摘あり**: 修正タスクを `PLAN.md` に `- [ ] F1: ...` 形式で追記し、
    `verify_round` をインクリメント。
@@ -411,6 +422,12 @@ done
   リトライ上限後は自動で BLOCKED に落とす
 - **ターンのタイムアウト**: `timeout`（`GSD_LITE_TURN_TIMEOUT` 秒、デフォルト 3600）で
   各ターンを包む。ハングしたターンは kill され「進捗なし」としてリトライ経路に乗る
+- **信頼するのはコミット済み state のみ**: ターンが異常終了（rc != 0 — kill・タイムアウト・
+  クラッシュ）した場合、作業ツリーの state.json は `git checkout HEAD --` で HEAD から
+  復元してから進捗を判定する。「state は更新したがコミット前に死んだ」ターンを
+  成功扱いしない（コミットまで到達していれば進捗と認め、警告だけ出す）
+- **依存チェック**: 起動前に `jq` / `timeout` / `flock` / claude バイナリの存在を確認し、
+  欠けていれば終了コード 6 で即停止する（誤った理由での BLOCKED を防ぐ）
 - 全ターンの標準出力を **`logs/<milestone>/`** に保存（マイルストーン別に分け、
   turn 初期化後の次マイルストーンによる上書きを防ぐ）
 - 終了コードで状態を表現: 0=完了 / 2=要人間(BLOCKED) / 3=max_turns / 4=discuss未完了
@@ -418,9 +435,9 @@ done
   （discuss が自分でデタッチ起動するケース）。そのため:
   - `claude -p` の呼び出し時に親セッション由来の環境変数を除去する
     （`env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude -p ...`）
-  - 先頭で二重起動ガード: `.gsd-lite/loop.pid` を **noclobber による原子的作成**で取得し
-    TOCTOU 競合を防ぐ（stale な pid ファイルは一度だけ掃除して再取得）。
-    起動元セッションを閉じてもループは生き続ける（setsid でデタッチ済み）
+  - 先頭で二重起動ガード: **`flock`**（`logs/.lock`）による排他。ロックはプロセス終了で
+    自動解放されるため stale 処理も競合窓も存在しない。`loop.pid` は --status 表示用の
+    情報ファイルに格下げ。起動元セッションを閉じてもループは生き続ける（setsid でデタッチ済み）
 - **終了フック**: いかなる理由でも終了する直前に、`.gsd-lite/hooks/on-exit.sh` が存在し
   実行可能なら `on-exit.sh <exit_code> <phase>` として呼ぶ。通知（ntfy / desktop 等）は
   ユーザーがこのフックに任意実装する。フックの失敗はループの終了コードに影響させない
@@ -470,6 +487,7 @@ done
 | 12 | ループの起動方法 | **discuss セッション自身が setsid でデタッチ起動するのを標準 UX に**（AUQ で確認、手動起動も可）。起動後はポーリングせず手を離す。loop.sh は env -u によるネスト対策と loop.pid の二重起動ガードを持つ |
 | 13 | 進捗監視 | **3 層すべて v1 に入れる**: `--status` サブコマンド（プル・トークンゼロ）/ `on-phase` フック（プッシュ通知）/ 監視サブエージェント（セッション内、フェーズ変化時のみ 1 行報告）。禁止されるのはターン毎のログ全文ポーリングのみ |
 | 14 | Codex 敵対的レビュー反映（2026-09-09） | **7 件の指摘をすべて修正**: state 更新→commit の順序統一 / リモート運用の base 汚染防止（verify の base 復帰 + discuss の base pull と MR 未マージ確認）/ allowlist に push・gh・glab 追加 / max_turns の実行前判定 / ターンの timeout / pid の原子的取得 / マイルストーン別ログ |
+| 15 | Codex 敵対的レビュー第 2 ラウンド反映（2026-09-09） | **回帰 2 件を含む 7 件を修正**: verify の base 復帰を撤回（復帰は次回 discuss 冒頭 0-a へ移動）/「信頼するのはコミット済み state のみ」原則（rc!=0 は HEAD から復元して判定）/ 排他を flock に置換 / retry を追跡対象外 logs/.retry へ分離 / discuss の遷移をコミットに内包 / init に既存プロジェクト更新モード / timeout・flock の依存チェック。テストはコミットする実 git スタブに刷新（27 assert） |
 
 ## 11. 利用手順（ユーザー視点のウォークスルー）
 

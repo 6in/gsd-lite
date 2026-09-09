@@ -13,13 +13,20 @@
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
 #                              kill し、進捗なし→リトライ経路に乗せる）
 #
+# 状態管理の原則: 信頼するのは「コミット済みの state」だけ。異常終了 (rc != 0) した
+# ターンの作業ツリー上の state は HEAD から復元し、コミットまで到達していたかどうかで
+# 進捗を判定する。リトライ回数は実行時情報なので追跡対象外（logs/.retry）に置き、
+# ループ自身がターン境界の作業ツリーを汚さない。
+#
 # 終了コード: 0=DONE / 2=BLOCKED / 3=max_turns / 4=discuss未完了 / 5=state異常 / 6=前提エラー
 
 set -u
 
 GSD_DIR=".gsd-lite"
 STATE="$GSD_DIR/state.json"
-PIDFILE="$GSD_DIR/loop.pid"
+PIDFILE="$GSD_DIR/loop.pid"        # 情報表示用（排他は flock が担う）
+LOCKFILE="$GSD_DIR/logs/.lock"     # logs/ は gitignore 済み
+RETRYFILE="$GSD_DIR/logs/.retry"
 CLAUDE_BIN="${GSD_LITE_CLAUDE_BIN:-claude}"
 PERMISSION_MODE="${GSD_LITE_PERMISSION_MODE:-acceptEdits}"
 
@@ -32,6 +39,9 @@ supdate() { # supdate '<jq filter>' — state.json をインプレース更新
   tmp=$(mktemp) || die "mktemp failed"
   jq "$1" "$STATE" > "$tmp" && mv "$tmp" "$STATE"
 }
+
+get_retry() { cat "$RETRYFILE" 2>/dev/null || echo 0; }
+set_retry() { echo "$1" > "$RETRYFILE"; }
 
 run_hook() { # run_hook <name> <args...> — フックの失敗は無視
   local hook="$GSD_DIR/hooks/$1"; shift
@@ -49,7 +59,8 @@ finish() { # finish <exit_code> — on-exit フックを呼んで終了
 status() {
   [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first)"
   echo "== gsd-lite status =="
-  jq -r '"milestone : \(.milestone)\nphase     : \(.phase)\nturn      : \(.turn)/\(.max_turns)\nnext      : \(.next_command)\nretry     : \(.retry)/\(.retry_max)\nverify    : round \(.verify_round)/\(.verify_round_max)\nbranch    : \(.branch.name) (base: \(.branch.base))\nupdated   : \(.updated_at)"' "$STATE"
+  jq -r '"milestone : \(.milestone)\nphase     : \(.phase)\nturn      : \(.turn)/\(.max_turns)\nnext      : \(.next_command)\nverify    : round \(.verify_round)/\(.verify_round_max)\nbranch    : \(.branch.name) (base: \(.branch.base))\nupdated   : \(.updated_at)"' "$STATE"
+  echo "retry     : $(get_retry)/$(sget '.retry_max')"
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo "loop      : RUNNING (pid $(cat "$PIDFILE"))"
   else
@@ -78,22 +89,19 @@ case "${1:-}" in
 esac
 
 command -v jq >/dev/null || die "jq is required"
+command -v timeout >/dev/null || die "timeout (coreutils) is required"
+command -v flock >/dev/null || die "flock (util-linux) is required"
 command -v "$CLAUDE_BIN" >/dev/null || die "claude binary not found: $CLAUDE_BIN"
 [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first, from the project root)"
-
-# 二重起動ガード（noclobber による原子的取得。stale な pid ファイルは一度だけ掃除して再取得）
-acquire_pidfile() { ( set -o noclobber; echo $$ > "$PIDFILE" ) 2>/dev/null; }
-if ! acquire_pidfile; then
-  oldpid=$(cat "$PIDFILE" 2>/dev/null || true)
-  if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
-    die "loop already running (pid $oldpid)"
-  fi
-  rm -f "$PIDFILE"
-  acquire_pidfile || die "could not acquire $PIDFILE (concurrent start?)"
-fi
-trap 'finish 130' INT TERM
+git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository"
 
 mkdir -p "$GSD_DIR/logs"
+
+# 二重起動ガード: flock はプロセス終了で自動解放されるため stale 問題も競合窓もない
+exec 9>"$LOCKFILE"
+flock -n 9 || die "loop already running (lock: $LOCKFILE)"
+echo $$ > "$PIDFILE"
+trap 'finish 130' INT TERM
 
 while true; do
   cmd=$(sget '.next_command')
@@ -115,7 +123,7 @@ while true; do
   fi
 
   phase=$(sget '.phase')
-  retry=$(sget '.retry')
+  retry=$(get_retry)
   model=$(sget ".model.\"$phase\" // empty")
   milestone=$(sget '.milestone // empty')
   logdir="$GSD_DIR/logs/${milestone:-default}"   # マイルストーン別に分けて上書きを防ぐ
@@ -131,10 +139,17 @@ while true; do
     ${model:+--model "$model"} \
     --permission-mode "$PERMISSION_MODE" \
     > "$log" 2>&1
+  rc=$?
 
+  if [ "$rc" -ne 0 ]; then
+    # kill / タイムアウト / 異常終了したターンの作業ツリー state は信頼しない。
+    # コミット済み (HEAD) の state に戻し、コミットまで到達していたかで進捗を判定する
+    echo "gsd-lite: turn exited rc=$rc — restoring committed state (see $log)" >&2
+    git checkout HEAD -- "$STATE" 2>/dev/null || true
+  fi
+
+  # ターンの生存確認: （コミット済みの）turn が進んでいなければ進捗なし
   turn_after=$(sget '.turn')
-
-  # ターンの生存確認: turn が進んでいなければ Claude が state を更新せずに死んだ
   if [ "$turn_after" -le "$turn_before" ]; then
     retry=$((retry + 1))
     retry_max=$(sget '.retry_max')
@@ -144,16 +159,19 @@ while true; do
       {
         echo "# BLOCKED (auto)"
         echo ""
-        echo "ループが自動生成した BLOCKED です。ターンが state.json を更新せずに"
-        echo "$retry 回連続で終了しました。最後のログ: $log"
+        echo "ループが自動生成した BLOCKED です。ターンが state.json を（コミットまで含めて）"
+        echo "更新せずに $retry 回連続で終了しました。最後のログ: $log"
       } > "$GSD_DIR/BLOCKED.md"
       finish 2
     fi
-    supdate ".retry = $retry"
+    set_retry "$retry"
     sleep 2
     continue
   fi
-  supdate '.retry = 0'
+  set_retry 0
+  if [ "$rc" -ne 0 ]; then
+    echo "gsd-lite: WARN turn advanced in committed state but rc=$rc — push 等の後処理が失敗した可能性。$log を確認" >&2
+  fi
 
   # フェーズ遷移フック
   phase_after=$(sget '.phase')

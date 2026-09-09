@@ -15,8 +15,14 @@ disable-model-invocation: true
    - カレントがプロジェクトルートであること（ユーザーに一言確認してよい）
    - git リポジトリであること。違えば `git init` を提案して実行
    - `jq` と `gsd-lite-loop.sh`（PATH 上）が使えること。なければ導入方法を案内して中断
-2. **既存チェック**: `.gsd-lite/state.json` が既にあれば、セットアップ済みなので
-   何もせずその旨を伝えて終了（進行中マイルストーンを壊さない）
+2. **既存チェック**: `.gsd-lite/state.json` が既にあればセットアップ済み。その場合は
+   AskUserQuestion で「**スキル・allowlist を最新テンプレートに更新するか**」を確認する:
+   - 更新する → `.claude/skills/gsd-lite-*` をテンプレートで上書きし、allowlist の
+     不足エントリをマージして、その変更だけをコミット（`gsd-lite: update skills`）。
+     **`.gsd-lite/` には一切触れない**（進行中マイルストーンを壊さない）
+   - 更新しない → 何もせず終了
+   （gsd-lite 本体を更新した後、既存プロジェクトに反映するのはこの手順。
+   install.sh はテンプレートを更新するだけで、配布済みプロジェクトには届かない）
 3. **足場生成**:
    - `mkdir -p .gsd-lite/logs .gsd-lite/hooks .gsd-lite/archive`
    - `~/.claude/gsd-lite/templates/state.json` → `.gsd-lite/state.json`

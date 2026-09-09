@@ -10,7 +10,6 @@
   },
   "turn": 0,
   "max_turns": 60,
-  "retry": 0,
   "retry_max": 2,
   "verify_round": 0,
   "verify_round_max": 2,

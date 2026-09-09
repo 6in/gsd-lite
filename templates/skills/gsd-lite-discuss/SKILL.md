@@ -12,13 +12,20 @@ disable-model-invocation: true
 
 引数があればそれがマイルストーンの初期要望。なければまず要望を聞く。
 
-## 0. 前回マイルストーンの退避
+## 0. ブランチ整理と前回マイルストーンの退避（この順で）
 
-`.gsd-lite/state.json` の `phase` が `done` なら、`.gsd-lite/` 直下の成果物
-（REQUIREMENTS / DECISIONS / RESEARCH / PLAN / PROGRESS / VERIFICATION 等）を
-`.gsd-lite/archive/<前回のmilestone>/` へ移動し、state.json をテンプレート初期値で
-作り直してから始める。`phase` が `discuss` 以外で done でもない場合は進行中の
-マイルストーンがあるので、ユーザーに状況を確認する（勝手に上書きしない）。
+**0-a. ブランチ整理（archive より先に行う）**: いま前回の作業ブランチ（`gsd-lite/*`）に
+いる場合（前回がリモート運用で MR 待ちのケース）は、state の `branch.base` へ
+`git checkout` で戻る。リモート（origin）があれば `git pull --ff-only origin <base>` で
+base を最新化する。**前回マイルストーンの MR が未マージ**（pull しても前回の成果が
+base に含まれない）場合は、AUQ で「マージを待つ / 前回成果を含まない base のまま
+進める」を確認する。
+
+**0-b. 退避**: （base に移った後の）`.gsd-lite/state.json` の `phase` が `done` なら、
+`.gsd-lite/` 直下の成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN / PROGRESS /
+VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、state.json を
+テンプレート初期値で作り直してから始める。`phase` が `discuss` 以外で done でもない
+場合は進行中のマイルストーンがあるので、ユーザーに状況を確認する（勝手に上書きしない）。
 
 ## 1. プロトコル: デザインツリーとフロンティア
 
@@ -70,21 +77,16 @@ disable-model-invocation: true
    - 確定内容サマリーへの合意
    - research の調査対象（similar_oss / official_docs / local_projects、
      multiSelect・デフォルト全選択）→ state.json の `research.targets` へ
-4. **マイルストーンブランチ作成**:
-   - milestone スラッグを確定して state.json の `milestone` へ（kebab-case）
-   - base を決める: 前回 state の `branch.base` が残っていればそれ、なければ現在の
-     ブランチ。**いま前回の作業ブランチ（`gsd-lite/*`）上にいる場合は必ず base に
-     戻ってから**進める（作業ブランチを base にすると次の MR が前の MR を向いてしまう）
+4. **マイルストーンブランチ作成**（base の整理は手順 0-a で済んでいる前提）:
    - 作業ツリーが clean か確認（dirty なら退避方法をユーザーと相談してから）
-   - リモート（origin）がある場合は `git checkout <base>` →
-     `git pull --ff-only origin <base>` で base を最新化。**前回マイルストーンの MR が
-     未マージ**（pull しても前回の成果が base に含まれない）なら、AUQ で
-     「マージを待つ / 前回成果を含まない base のまま進める」を確認する
-   - base 名を `branch.base` に記録し、`git checkout -b gsd-lite/<slug>`
-   - `branch.name` を更新し、REQUIREMENTS.md / DECISIONS.md / state.json を
-     一括コミット（`gsd-lite(discuss): <slug> 要件確定`）
-   - state.json: `phase: "research"` / `next_command: "/gsd-lite-research"` /
-     `updated_at` を現在時刻に
+   - 現在のブランチ（= base）名を控え、`git checkout -b gsd-lite/<slug>`
+   - state.json を**すべて更新してから**コミットする: `milestone`（kebab-case の
+     スラッグ）/ `branch`（name と base）/ `research.targets` / `phase: "research"` /
+     `next_command: "/gsd-lite-research"` / `updated_at`。
+     そのうえで REQUIREMENTS.md / DECISIONS.md / state.json を一括コミット
+     （`gsd-lite(discuss): <slug> 要件確定`）。
+     **遷移（next_command）までコミットに含めるのが重要** — コミット後に state を
+     いじると、git 復元時に要件確定済みなのに DISCUSS へ戻ってしまう
 5. 最後の AUQ で「今すぐループを起動するか」「起動する場合、このセッションで
    進捗を見守るか」を確認する:
    - **起動する**: `setsid gsd-lite-loop.sh > .gsd-lite/logs/loop.log 2>&1 &` で
