@@ -1,0 +1,26 @@
+{
+  "_comment": "gsd-lite の無人ターン (claude -p) 用 allowlist の雛形。init がプロジェクトの .claude/settings.json にマージする。テストランナー等はプロジェクトに合わせて調整すること。",
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git merge:*)",
+      "Bash(jq:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "WebSearch",
+      "WebFetch(domain:*)",
+      "Read(~/workspaces/**)"
+    ]
+  }
+}
