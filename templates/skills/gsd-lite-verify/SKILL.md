@@ -21,12 +21,27 @@ disable-model-invocation: true
 3. 結果で分岐:
 
    **合格の場合**
-   - `.gsd-lite/VERIFICATION.md` に検証結果（観点・確認したこと・残留リスク）を書く
-   - コミットしてから**ベースブランチへ自動マージ**:
-     `git checkout <branch.base>` → `git merge --no-ff gsd-lite/<slug>`
-   - マージが衝突したら `git merge --abort` → `git checkout gsd-lite/<slug>` で
-     ブランチに戻り、衝突内容を BLOCKED.md に書いて BLOCKED にする（人間が解決）
+   - `.gsd-lite/VERIFICATION.md` に検証結果（観点・確認したこと・残留リスク）を書いてコミット
+   - `git remote get-url origin` で**リモートの有無を判定**して分岐:
+
+   **(a) リモートなし（ローカルのみ）→ ベースブランチへ自動マージ**
+   - `git checkout <branch.base>` → `git merge --no-ff gsd-lite/<slug>`
+   - 衝突したら `git merge --abort` → `git checkout gsd-lite/<slug>` でブランチに戻り、
+     衝突内容を BLOCKED.md に書いて BLOCKED にする（人間が解決）
    - マージ成功: ブランチは削除せず残す。`phase: "done"` / `next_command: "DONE"`
+
+   **(b) リモートあり → push + MR/PR 作成（ローカルマージはしない）**
+   - `git push -u origin gsd-lite/<slug>`
+   - origin の URL からホストを判別して MR/PR を作成:
+     - github.com → `gh pr create --base <branch.base> --title "<milestone の要約>" --body "..."`
+     - gitlab を含む → `glab mr create --target-branch <branch.base> --title "..." --description "..."`
+   - MR/PR の本文には受け入れ基準の達成状況と VERIFICATION.md の要約を書き、
+     末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)` を付ける
+   - 作成成功: MR/PR の URL を VERIFICATION.md と PROGRESS.md に記録。
+     ブランチはそのまま。`phase: "done"` / `next_command: "DONE"`（マージは人間 / CI）
+   - push はできたが MR/PR 作成に失敗（CLI 不在・未認証・ホスト不明など）:
+     push 済みであることと失敗理由・手動作成の手順を BLOCKED.md に書いて BLOCKED にする
+   - push 自体が失敗: 理由を BLOCKED.md に書いて BLOCKED にする
 
    **指摘ありの場合**
    - 修正タスクを `.gsd-lite/PLAN.md` の Tasks 末尾に `- [ ] F1: ...` 形式で追記

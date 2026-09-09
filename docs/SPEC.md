@@ -31,7 +31,8 @@ gsd-core はワークフロー 33,000 行超・スキル 69 個・4.5MB の重�
 
 - 5 フェーズ（discuss / research / plan / impl / verify）のステートマシンと外部ファイルによる状態管理
   - discuss は対話セッションで実行、research 以降は無人ループで実行
-- マイルストーンブランチ運用（discuss 完了時に `gsd-lite/<slug>` を作成、verify 合格でベースブランチへ自動マージ）
+- マイルストーンブランチ運用（discuss 完了時に `gsd-lite/<slug>` を作成、verify 合格で
+  ローカルのみならベースへ自動マージ、リモートありなら push + MR/PR 作成）
 - ダムなループスクリプト `loop.sh`（判断ロジックを持たない）
 - 雛形スキル 6 個（init / discuss / research / plan / impl / verify）をプロジェクトローカルに配置
 - ブロック時の安全停止（人間へのエスカレーション）
@@ -333,11 +334,19 @@ PLAN.md のタスク形式:
 1. マイルストーン開始コミット以降の diff 全体を対象に、
    (a) コードレビュー（バグ・設計・テスト妥当性）、(b) セキュリティチェック
    （入力検証・認可・秘密情報・インジェクション等）を実施
-2. **合格**: `VERIFICATION.md` に結果を書いてコミットし、**ベースブランチへ自動マージ**
-   する: `git checkout <branch.base>` → `git merge --no-ff gsd-lite/<slug>`。
-   マージが衝突した場合は `git merge --abort` してマイルストーンブランチに戻り、
-   BLOCKED で停止（人間が解決）。マージ成功後、ブランチは削除せず残す（履歴の目印。
-   掃除は人間の任意）。`phase: "done"` / `next_command: "DONE"` で終了
+2. **合格**: `VERIFICATION.md` に結果を書いてコミットし、**リモートの有無で分岐**する
+   （`git remote get-url origin` で判定）:
+   - **リモートなし（ローカルのみ）**: ベースブランチへ自動マージ:
+     `git checkout <branch.base>` → `git merge --no-ff gsd-lite/<slug>`。
+     衝突した場合は `git merge --abort` してマイルストーンブランチに戻り BLOCKED
+     （人間が解決）。マージ成功後、ブランチは削除せず残す。
+     `phase: "done"` / `next_command: "DONE"` で終了
+   - **リモートあり**: ローカルマージはせず `git push -u origin gsd-lite/<slug>` して
+     **MR/PR を作成**する（github.com → `gh pr create`、gitlab → `glab mr create`、
+     ターゲットは `branch.base`。本文に受け入れ基準の達成状況と VERIFICATION 要約）。
+     作成成功で URL を VERIFICATION.md / PROGRESS.md に記録し
+     `phase: "done"` / `next_command: "DONE"`（**マージは人間 / CI に委ねる**）。
+     CLI 不在・未認証・ホスト不明・push 失敗は状況を BLOCKED.md に書いて BLOCKED
 3. **指摘あり**: 修正タスクを `PLAN.md` に `- [ ] F1: ...` 形式で追記し、
    `verify_round` をインクリメント。
    - `verify_round <= verify_round_max` → `next_command: "/gsd-lite-impl"`（差し戻し）
@@ -443,7 +452,7 @@ done
 | 6 | discuss の深さ | **grilling のフロンティア方式を AUQ で実装**（§6）。フロンティアが空になるまで詰め切る |
 | 7 | ブランチ運用 | **discuss 完了時に `gsd-lite/<slug>` を作成**（slug = milestone、要件類はブランチに一括コミット）。init のコミット（スキル・allowlist）はベースブランチに残る |
 | 8 | ループの実行場所 | **同一作業ツリー**（ループ実行中はリポジトリを触らない運用）。worktree 分離は v2 候補 |
-| 9 | DONE 時の処理 | **ベースブランチへローカル自動マージ**（--no-ff）。衝突時は abort して BLOCKED。ブランチは残す |
+| 9 | DONE 時の処理 | ~~ローカル自動マージのみ~~ → **2026-09-09 改訂: リモートの有無で分岐**。ローカルのみ: ベースへ --no-ff 自動マージ（衝突は BLOCKED）/ リモートあり: push + MR/PR 作成して DONE（マージは人間・CI）。ブランチは残す |
 | 10 | research フェーズ | **discuss と plan の間に独立フェーズとして新設**（無人ループ内）。重大発見（作るか使うかの判断を要するもの）は BLOCKED で人間に戻す |
 | 11 | research の調査対象 | **similar_oss / official_docs / local_projects の 3 種をマイルストーンごとに選択可能**（discuss 最終ラウンドの AUQ、デフォルト全選択） |
 | 12 | ループの起動方法 | **discuss セッション自身が setsid でデタッチ起動するのを標準 UX に**（AUQ で確認、手動起動も可）。起動後はポーリングせず手を離す。loop.sh は env -u によるネスト対策と loop.pid の二重起動ガードを持つ |
@@ -518,7 +527,7 @@ setsid gsd-lite-loop.sh > .gsd-lite/logs/loop.log 2>&1 &
 
 | exit | 意味 | ユーザーがやること |
 |---|---|---|
-| 0 | DONE | ベースブランチにマージ済み。`VERIFICATION.md` と成果を確認して終わり |
+| 0 | DONE | ローカルのみ: ベースブランチにマージ済み / リモートあり: MR/PR 作成済み（URL は `VERIFICATION.md`）。成果を確認して終わり |
 | 2 | BLOCKED | `BLOCKED.md` を読む → 対話セッションで判断を REQUIREMENTS/PLAN に反映 → `next_command` を戻す → loop.sh 再実行 |
 | 3 | max_turns | 進捗と PLAN を確認し、必要なら max_turns を増やして再実行 |
 | 4 | discuss 未完了 | 対話セッションで /gsd-lite-discuss を先に実行 |

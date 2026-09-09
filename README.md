@@ -1,7 +1,8 @@
 # gsd-lite
 
 gsd-core のライト版。**対話で仕様を詰め切ったら、あとは無人ループが
-research → plan → impl → verify → 自動マージまで進める**最小構成の自律開発ランナー。
+research → plan → impl → verify → 仕上げ（ローカルのみなら自動マージ /
+リモートありなら push + MR/PR 作成）まで進める**最小構成の自律開発ランナー。
 
 - 毎ターン `claude -p "/スキル名"` で新規コンテキスト起動。継続性は `.gsd-lite/` + git のみ
 - ループ（`gsd-lite-loop.sh`）はダム: `state.json` の `next_command` を実行するだけ
@@ -33,6 +34,6 @@ claude
 gsd-lite-loop.sh --status
 ```
 
-終了コード: 0=DONE（マージ済み）/ 2=BLOCKED（`.gsd-lite/BLOCKED.md` 参照）/
+終了コード: 0=DONE（ローカル: マージ済み / リモート: MR 作成済み）/ 2=BLOCKED（`.gsd-lite/BLOCKED.md` 参照）/
 3=max_turns / 4=discuss 未完了。通知が欲しければ `.gsd-lite/hooks/on-exit.sh` と
 `on-phase.sh` に書く。
