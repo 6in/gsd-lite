@@ -77,7 +77,7 @@ GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > loop-out.log 2>&1
 assert_eq "exit code 0 (DONE)" "$?" "0"
 assert_eq "final phase" "$(jq -r .phase .gsd-lite/state.json)" "done"
 assert_eq "total turns" "$(jq -r .turn .gsd-lite/state.json)" "5"
-assert_eq "log files" "$(ls .gsd-lite/logs/turn-*.log | wc -l)" "5"
+assert_eq "log files" "$( ls .gsd-lite/logs/toy/turn-*.log | wc -l)" "5"
 assert_eq "phase hooks fired" "$(grep -c '^phase ' .gsd-lite/hooks.log)" "4"
 assert_eq "exit hook" "$(grep -c 'exit code=0 phase=done' .gsd-lite/hooks.log)" "1"
 grep -q -- "--model sonnet-stub" .gsd-lite/stub-args.log 2>/dev/null \
@@ -91,7 +91,7 @@ GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-noop" "$LOOP" > loop-out.log 2>&1
 assert_eq "exit code 2 (BLOCKED)" "$?" "2"
 assert_eq "state is BLOCKED" "$(jq -r .next_command .gsd-lite/state.json)" "BLOCKED"
 grep -q "auto" .gsd-lite/BLOCKED.md && ok "BLOCKED.md auto-written" || ng "BLOCKED.md missing"
-assert_eq "attempts logged" "$(ls .gsd-lite/logs/turn-001-attempt*.log | wc -l)" "3"
+assert_eq "attempts logged" "$(ls .gsd-lite/logs/toy/turn-001-attempt*.log | wc -l)" "3"
 assert_eq "exit hook code=2" "$(grep -c 'exit code=2' .gsd-lite/hooks.log)" "1"
 
 echo "== Test 3: スキル自身が BLOCKED を書いた場合 =="
@@ -111,6 +111,16 @@ cd "$TESTROOT/p1"
 out=$("$LOOP" --status)
 echo "$out" | grep -q "phase     : done" && ok "status shows phase" || ng "status phase"
 echo "$out" | grep -q "loop      : not running" && ok "status shows not running" || ng "status running state"
+
+echo "== Test 6: max_turns 事前判定と番兵の優先 =="
+make_project "$TESTROOT/p6"
+t=$(mktemp); jq '.turn=10' .gsd-lite/state.json > "$t" && mv "$t" .gsd-lite/state.json
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > loop-out.log 2>&1
+assert_eq "exit 3 without running a turn" "$?" "3"
+assert_eq "no turn logs written" "$(ls .gsd-lite/logs/toy/turn-*.log 2>/dev/null | wc -l)" "0"
+t=$(mktemp); jq '.next_command="DONE" | .phase="done"' .gsd-lite/state.json > "$t" && mv "$t" .gsd-lite/state.json
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > loop-out.log 2>&1
+assert_eq "DONE wins over max_turns (exit 0)" "$?" "0"
 
 echo ""
 echo "RESULT: PASS=$PASS FAIL=$FAIL"

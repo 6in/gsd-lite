@@ -33,10 +33,13 @@ disable-model-invocation: true
 
 ## ターン終了の共通手順（必須・この順で）
 
-1. 成果物を git commit（`gsd-lite(research): <要約>`）
-2. `.gsd-lite/PROGRESS.md` に 3〜5 行追記（やったこと / 次 / 注意点）
-3. `state.json` を更新: `next_command` と `phase` を上記のとおり、`turn` を +1、
+1. `.gsd-lite/PROGRESS.md` に 3〜5 行追記（やったこと / 次 / 注意点）
+2. `state.json` を更新: `next_command` と `phase` を上記のとおり、`turn` を +1、
    `updated_at` を現在時刻（ISO 8601）に。**turn の +1 を忘れるとループが
    リトライ扱いにするので必ず行う**
+3. 成果物・PROGRESS.md・state.json を**まとめて git commit**（`gsd-lite(research): <要約>`）。
+   **state 更新 → commit の順序が重要**: 逆にすると最終 state が未コミットで残り、
+   git からの復元時に完了済みフェーズを再実行してしまう
 4. 判断に迷ったら推測しない: `.gsd-lite/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
-   `next_command: "BLOCKED"` / `phase: "blocked"` にして（turn は +1）終了する
+   `next_command: "BLOCKED"` / `phase: "blocked"`（turn は +1）にしたうえで
+   同様にコミットして終了する

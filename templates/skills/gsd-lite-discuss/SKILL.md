@@ -72,8 +72,15 @@ disable-model-invocation: true
      multiSelect・デフォルト全選択）→ state.json の `research.targets` へ
 4. **マイルストーンブランチ作成**:
    - milestone スラッグを確定して state.json の `milestone` へ（kebab-case）
+   - base を決める: 前回 state の `branch.base` が残っていればそれ、なければ現在の
+     ブランチ。**いま前回の作業ブランチ（`gsd-lite/*`）上にいる場合は必ず base に
+     戻ってから**進める（作業ブランチを base にすると次の MR が前の MR を向いてしまう）
    - 作業ツリーが clean か確認（dirty なら退避方法をユーザーと相談してから）
-   - 現在のブランチ名を `branch.base` に記録し、`git checkout -b gsd-lite/<slug>`
+   - リモート（origin）がある場合は `git checkout <base>` →
+     `git pull --ff-only origin <base>` で base を最新化。**前回マイルストーンの MR が
+     未マージ**（pull しても前回の成果が base に含まれない）なら、AUQ で
+     「マージを待つ / 前回成果を含まない base のまま進める」を確認する
+   - base 名を `branch.base` に記録し、`git checkout -b gsd-lite/<slug>`
    - `branch.name` を更新し、REQUIREMENTS.md / DECISIONS.md / state.json を
      一括コミット（`gsd-lite(discuss): <slug> 要件確定`）
    - state.json: `phase: "research"` / `next_command: "/gsd-lite-research"` /

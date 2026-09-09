@@ -10,6 +10,8 @@
 # 環境変数:
 #   GSD_LITE_CLAUDE_BIN        claude バイナリの上書き（テスト用スタブ差し込み）
 #   GSD_LITE_PERMISSION_MODE   claude -p の --permission-mode（デフォルト acceptEdits）
+#   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
+#                              kill し、進捗なし→リトライ経路に乗せる）
 #
 # 終了コード: 0=DONE / 2=BLOCKED / 3=max_turns / 4=discuss未完了 / 5=state異常 / 6=前提エラー
 
@@ -79,11 +81,16 @@ command -v jq >/dev/null || die "jq is required"
 command -v "$CLAUDE_BIN" >/dev/null || die "claude binary not found: $CLAUDE_BIN"
 [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first, from the project root)"
 
-# 二重起動ガード
-if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-  die "loop already running (pid $(cat "$PIDFILE"))"
+# 二重起動ガード（noclobber による原子的取得。stale な pid ファイルは一度だけ掃除して再取得）
+acquire_pidfile() { ( set -o noclobber; echo $$ > "$PIDFILE" ) 2>/dev/null; }
+if ! acquire_pidfile; then
+  oldpid=$(cat "$PIDFILE" 2>/dev/null || true)
+  if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+    die "loop already running (pid $oldpid)"
+  fi
+  rm -f "$PIDFILE"
+  acquire_pidfile || die "could not acquire $PIDFILE (concurrent start?)"
 fi
-echo $$ > "$PIDFILE"
 trap 'finish 130' INT TERM
 
 mkdir -p "$GSD_DIR/logs"
@@ -98,15 +105,28 @@ while true; do
     *)       echo "gsd-lite: unknown next_command: $cmd" >&2; finish 5 ;;
   esac
 
+  # 実行前に上限を判定する（DONE / BLOCKED の番兵は上で判定済みなので終端状態が優先される。
+  # 上限到達済み state からの再起動で 1 ターン余計に実行しない）
   turn_before=$(sget '.turn')
+  max_turns=$(sget '.max_turns')
+  if [ "$turn_before" -ge "$max_turns" ]; then
+    echo "gsd-lite: max_turns ($max_turns) reached" >&2
+    finish 3
+  fi
+
   phase=$(sget '.phase')
   retry=$(sget '.retry')
   model=$(sget ".model.\"$phase\" // empty")
-  log="$GSD_DIR/logs/turn-$(printf '%03d' $((turn_before + 1)))-attempt$((retry + 1)).log"
+  milestone=$(sget '.milestone // empty')
+  logdir="$GSD_DIR/logs/${milestone:-default}"   # マイルストーン別に分けて上書きを防ぐ
+  mkdir -p "$logdir"
+  log="$logdir/turn-$(printf '%03d' $((turn_before + 1)))-attempt$((retry + 1)).log"
 
   echo "gsd-lite: turn $((turn_before + 1)) [$phase] $cmd (attempt $((retry + 1)))"
-  # 親が Claude Code セッションでもネスト起動できるよう、セッション由来の環境変数を除去
+  # 親が Claude Code セッションでもネスト起動できるよう、セッション由来の環境変数を除去。
+  # timeout でハングを検知し（超過は kill）、進捗なし→リトライ経路に乗せる
   env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
+    timeout -k 30 "${GSD_LITE_TURN_TIMEOUT:-3600}" \
     "$CLAUDE_BIN" -p "$cmd" \
     ${model:+--model "$model"} \
     --permission-mode "$PERMISSION_MODE" \
@@ -140,12 +160,6 @@ while true; do
   if [ "$phase_after" != "$phase" ]; then
     echo "gsd-lite: phase $phase -> $phase_after"
     run_hook on-phase.sh "$phase" "$phase_after"
-  fi
-
-  max_turns=$(sget '.max_turns')
-  if [ "$turn_after" -ge "$max_turns" ]; then
-    echo "gsd-lite: max_turns ($max_turns) reached" >&2
-    finish 3
   fi
 
   sleep 1

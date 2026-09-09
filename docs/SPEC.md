@@ -129,7 +129,7 @@ gsd-lite/
     ├── archive/<slug>/         # 完了済みマイルストーンの成果物（次の discuss 開始時に退避）
     ├── hooks/on-exit.sh        # 任意。存在すればループ終了時に呼ばれる（通知等はユーザー実装）
     ├── hooks/on-phase.sh       # 任意。フェーズ遷移時に呼ばれる（進捗のプッシュ通知用）
-    └── logs/turn-NNN.log       # loop.sh が保存する各ターンの標準出力
+    └── logs/<milestone>/turn-NNN.log  # 各ターンの標準出力（マイルストーン別）
 ```
 
 `.gsd-lite/` と `.claude/skills/` は **git コミット対象**。リカバリと監査は git log + state で行う。
@@ -185,10 +185,12 @@ gsd-lite/
 
 共通ルール（全スキルの末尾に共通セクションとして記載する）:
 
-- ターン終了時に必ず: (1) 成果を git commit、(2) `PROGRESS.md` に 3〜5 行追記、
-  (3) `state.json` の `next_command` / `phase` / `turn` / `updated_at` を更新
+- ターン終了時に必ず: (1) `PROGRESS.md` に 3〜5 行追記、(2) `state.json` の
+  `next_command` / `phase` / `turn` / `updated_at` を更新、(3) 成果物・PROGRESS・state を
+  **まとめて git commit**。**state 更新 → commit の順序が重要** — 逆にすると最終 state が
+  未コミットで残り、git からの復元時に完了済みフェーズを再実行してしまう
 - 判断に迷う点・要件の曖昧さ・想定外の失敗に遭遇したら **推測せず** `BLOCKED.md` に
-  状況と選択肢を書き、`next_command: "BLOCKED"` にして終了する
+  状況と選択肢を書き、`next_command: "BLOCKED"` にしたうえで同様にコミットして終了する
 
 ### /gsd-lite-init（グローバルスキル・対話セッションで実行）
 
@@ -260,10 +262,13 @@ AskUserQuestion（AUQ）で実装したもの。原典の「番号付き質問+�
    足りなければフロンティアに戻す
 3. 最終 AUQ で (a) 確定内容のサマリーへの合意、(b) research の調査対象
    （similar_oss / official_docs / local_projects、multiSelect・デフォルト全選択）を取る
-4. **マイルストーンブランチを作成**: 作業ツリーが clean であることを確認のうえ
-   `git checkout -b gsd-lite/<slug>` し、現在のブランチ名を `branch.base` に記録。
+4. **マイルストーンブランチを作成**: base は前回 state の `branch.base`（なければ
+   現在のブランチ。前回の作業ブランチ `gsd-lite/*` 上にいる場合は必ず base に戻る）。
+   作業ツリーが clean であることを確認し（dirty なら退避方法をユーザーと相談）、
+   リモートがあれば `git checkout <base>` → `git pull --ff-only` で base を最新化
+   （前回 MR が未マージなら AUQ で「待つ / そのまま進める」を確認）。そのうえで
+   `git checkout -b gsd-lite/<slug>` し、base 名を `branch.base` に記録、
    REQUIREMENTS.md / DECISIONS.md / state.json をブランチ上に一括コミットする
-   （dirty なら退避方法をユーザーと相談してから）
 5. `phase: "research"` / `next_command: "/gsd-lite-research"` に更新
 6. 最後の AUQ で「今すぐループを起動するか」を確認する。
    - **起動する**: discuss セッション自身が `setsid gsd-lite-loop.sh
@@ -348,6 +353,9 @@ PLAN.md のタスク形式:
      ターゲットは `branch.base`。本文に受け入れ基準の達成状況と VERIFICATION 要約）。
      作成成功で URL を VERIFICATION.md / PROGRESS.md に記録し
      `phase: "done"` / `next_command: "DONE"`（**マージは人間 / CI に委ねる**）。
+     最終 state をコミットして再 push したのち **`git checkout <branch.base>` で
+     ベースブランチに戻って終了する**（作業ブランチに残ると次のマイルストーンが
+     このブランチを base にしてしまうため）。
      CLI 不在・未認証・ホスト不明・push 失敗は状況を BLOCKED.md に書いて BLOCKED
 3. **指摘あり**: 修正タスクを `PLAN.md` に `- [ ] F1: ...` 形式で追記し、
    `verify_round` をインクリメント。
@@ -390,11 +398,9 @@ while true; do
     continue
   fi
   jq '.retry=0' ...  # 正常ターンで retry リセット
-
-  if [ "$turn_after" -ge "$(jq -r .max_turns .gsd-lite/state.json)" ]; then
-    echo "max_turns reached"; exit 3
-  fi
 done
+# ※ max_turns はループ先頭・番兵判定の直後に「実行前」判定する（実装参照）。
+#   到達済み state からの再起動で 1 ターン余計に実行せず、DONE/BLOCKED が上限より優先される
 ```
 
 設計上のポイント:
@@ -403,13 +409,17 @@ done
   max_turns 超過）だけを行う
 - turn 番号による生存確認で「`claude -p` が途中クラッシュして state 未更新」を検知し、
   リトライ上限後は自動で BLOCKED に落とす
-- 全ターンの標準出力を `logs/` に保存（事後調査用）
+- **ターンのタイムアウト**: `timeout`（`GSD_LITE_TURN_TIMEOUT` 秒、デフォルト 3600）で
+  各ターンを包む。ハングしたターンは kill され「進捗なし」としてリトライ経路に乗る
+- 全ターンの標準出力を **`logs/<milestone>/`** に保存（マイルストーン別に分け、
+  turn 初期化後の次マイルストーンによる上書きを防ぐ）
 - 終了コードで状態を表現: 0=完了 / 2=要人間(BLOCKED) / 3=max_turns / 4=discuss未完了
 - **ネスト起動対応**: loop.sh は Claude Code セッション内の Bash からも起動される
   （discuss が自分でデタッチ起動するケース）。そのため:
   - `claude -p` の呼び出し時に親セッション由来の環境変数を除去する
     （`env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude -p ...`）
-  - 先頭で二重起動ガード（`.gsd-lite/loop.pid` の生存チェック）を行う。
+  - 先頭で二重起動ガード: `.gsd-lite/loop.pid` を **noclobber による原子的作成**で取得し
+    TOCTOU 競合を防ぐ（stale な pid ファイルは一度だけ掃除して再取得）。
     起動元セッションを閉じてもループは生き続ける（setsid でデタッチ済み）
 - **終了フック**: いかなる理由でも終了する直前に、`.gsd-lite/hooks/on-exit.sh` が存在し
   実行可能なら `on-exit.sh <exit_code> <phase>` として呼ぶ。通知（ntfy / desktop 等）は
@@ -459,6 +469,7 @@ done
 | 11 | research の調査対象 | **similar_oss / official_docs / local_projects の 3 種をマイルストーンごとに選択可能**（discuss 最終ラウンドの AUQ、デフォルト全選択） |
 | 12 | ループの起動方法 | **discuss セッション自身が setsid でデタッチ起動するのを標準 UX に**（AUQ で確認、手動起動も可）。起動後はポーリングせず手を離す。loop.sh は env -u によるネスト対策と loop.pid の二重起動ガードを持つ |
 | 13 | 進捗監視 | **3 層すべて v1 に入れる**: `--status` サブコマンド（プル・トークンゼロ）/ `on-phase` フック（プッシュ通知）/ 監視サブエージェント（セッション内、フェーズ変化時のみ 1 行報告）。禁止されるのはターン毎のログ全文ポーリングのみ |
+| 14 | Codex 敵対的レビュー反映（2026-09-09） | **7 件の指摘をすべて修正**: state 更新→commit の順序統一 / リモート運用の base 汚染防止（verify の base 復帰 + discuss の base pull と MR 未マージ確認）/ allowlist に push・gh・glab 追加 / max_turns の実行前判定 / ターンの timeout / pid の原子的取得 / マイルストーン別ログ |
 
 ## 11. 利用手順（ユーザー視点のウォークスルー）
 
