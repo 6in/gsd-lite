@@ -238,6 +238,19 @@
   <p class="flow-note">点線の discuss だけが人間との対話。research から先はぜんぶ無人です。verify で指摘が出ると impl に差し戻されます（回数上限つき）。</p>
   <p><strong>discuss（対話）</strong>は、仕様を「詰め切る」フェーズです。Matt Pocock さんの grill-me というスキルのプロトコルを拝借していて、決定事項をツリーとして扱い、<em>いま聞ける質問を全部まとめて 1 ラウンドで聞く</em>方式。しかも質問は選択肢 + 推奨付きの UI（AskUserQuestion）で来るので、ユーザーはポチポチ選ぶだけです。決まったことはその場で REQUIREMENTS.md（何を作るか）と DECISIONS.md（なぜそう決めたか・何を却下したか）に書き込まれます。</p>
   <p><strong>research → plan → impl → verify（無人）</strong>は、それぞれが独立した <code>claude -p</code> ターンです。research は類似 OSS や公式ドキュメントを調べて要件を補強し、plan は「1 ターンで実装 + テスト + コミットまで完結する粒度」のタスク列を作ります。impl は<em>1 ターンにつき 1 タスクだけ</em>。verify はマイルストーン全体の diff をレビュー + セキュリティチェックして、合格ならローカルでは main へ自動マージ、リモートがあるプロジェクトでは push して MR/PR を作成します。</p>
+  <h3>完了時は「マージ」か「MR」か — リモートの有無で自動判別</h3>
+  <p>verify に合格したあとの仕上げは、リポジトリに <code>origin</code>（リモート）が設定されているかで自動的に切り替わります。</p>
+  <ul class="principles">
+    <li>
+      <span class="p-title">ローカルだけのリポジトリ → 自動マージ</span>
+      <span class="p-body">ベースブランチ（main など）へ <code>--no-ff</code> でマージして完了。マージコミットが残るので、あとから「このマイルストーンで何が入ったか」を一目で追えます。衝突したときは自動で諦めて BLOCKED 停止します。</span>
+    </li>
+    <li>
+      <span class="p-title">リモートがあるリポジトリ → push + MR/PR 作成</span>
+      <span class="p-body">勝手にマージはしません。ブランチを push して MR / PR を自動作成し、そこで完了扱い。GitHub なら gh CLI、GitLab なら glab（なければ push オプションという GitLab のサーバー機能で代替）。<strong>マージボタンを押すのは人間か CI</strong> です。</span>
+    </li>
+  </ul>
+  <p>個人の実験リポジトリでは朝には main が進んでいてほしいし、チームのリポジトリで AI が勝手に main を書き換えたら事故です。<em>「自動化の境界線をどこに引くか」をリポジトリの性質から推定する</em>、というのがこの分岐の意図です。</p>
   <p>そして全体の司令塔が、この小さな state.json です。</p>
   <pre><code>{
   "milestone": "v2-edit-search-tags",
