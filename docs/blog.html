@@ -202,56 +202,56 @@
 
 <main>
   <p class="eyebrow">Problem</p>
-  <h2>AI に開発を任せると、だんだん残念になる問題</h2>
+  <h2>🫠 AI に開発を任せると、だんだん残念になる問題</h2>
   <p>Claude Code に大きめの機能開発を任せたことがある方なら、きっと心当たりがあるはずです。<strong>最初は冴えているのに、セッションが長くなるほど精彩を欠いていく</strong>。原因はシンプルで、1 つのセッションで計画も実装もレビューも回すと、コンテキストが際限なく膨らんでいくからです。</p>
   <p>かといって、フルセットの開発フレームワーク（私の場合は GSD という、スキル 69 個・ワークフロー 3.3 万行の重厚なやつ）を使うと、今度は 1 マイルストーンを完了させるまでの道のりが長い。丁寧なのはいいことなんですが、「ちょっとした機能を安心して任せたい」には重すぎました。</p>
   <p>そこで、割り切った軽量版を自作することにしました。名前は <strong>gsd-lite</strong>。設計はたった 3 つの原則に絞っています。</p>
 
   <p class="eyebrow">Principles</p>
-  <h2>目指したのは「コンテキストを持ち越さない」開発</h2>
+  <h2>✨ 目指したのは「コンテキストを持ち越さない」開発</h2>
   <ul class="principles">
     <li>
-      <span class="p-title">① 毎ターン、新品のコンテキストで</span>
+      <span class="p-title">① ♻️ 毎ターン、新品のコンテキストで</span>
       <span class="p-body">作業 1 単位ごとに <code>claude -p</code> で新しい Claude を起動して、終わったら捨てます。記憶の持ち越しはゼロ。継続性はファイル（.gsd-lite/）と git のコミット履歴だけに持たせます。</span>
     </li>
     <li>
-      <span class="p-title">② ループは「何も考えない」</span>
+      <span class="p-title">② 🤖 ループは「何も考えない」</span>
       <span class="p-body">全体を回すループスクリプトは、state.json に書かれた「次のコマンド」を実行するだけ。次に何をすべきかの判断は、毎ターンの Claude 自身が state に書き残します。賢さの置き場所を 1 か所に集めない、が肝です。</span>
     </li>
     <li>
-      <span class="p-title">③ 人間の判断は前倒し、迷ったら停止</span>
+      <span class="p-title">③ ✋ 人間の判断は前倒し、迷ったら停止</span>
       <span class="p-body">仕様の曖昧さは最初の対話フェーズで潰し切ります。無人区間の Claude は迷ったら推測せず、質問を書き残して停止（BLOCKED）。「勝手にいい感じにやっといたよ」を構造的に禁止しています。</span>
     </li>
   </ul>
 
   <p class="eyebrow">Architecture</p>
-  <h2>アーキテクチャ：5 つのフェーズと、1 枚の state</h2>
+  <h2>🏗️ アーキテクチャ：5 つのフェーズと、1 枚の state</h2>
   <p>マイルストーン（ひとまとまりの機能開発）は、5 つのフェーズを一方通行で流れます。</p>
   <div class="flow">
-    <span class="ph human">discuss</span><span class="arr">→</span>
-    <span class="ph">research</span><span class="arr">→</span>
-    <span class="ph">plan</span><span class="arr">→</span>
-    <span class="ph">impl ×N</span><span class="arr">→</span>
-    <span class="ph">verify</span><span class="arr">→</span>
-    <span class="ph goal">merge / MR</span>
+    <span class="ph human">💬 discuss</span><span class="arr">→</span>
+    <span class="ph">🔍 research</span><span class="arr">→</span>
+    <span class="ph">📋 plan</span><span class="arr">→</span>
+    <span class="ph">💻 impl ×N</span><span class="arr">→</span>
+    <span class="ph">🛡️ verify</span><span class="arr">→</span>
+    <span class="ph goal">🎉 merge / MR</span>
   </div>
   <p class="flow-note">点線の discuss だけが人間との対話。research から先はぜんぶ無人です。verify で指摘が出ると impl に差し戻されます（回数上限つき）。</p>
   <p><strong>discuss（対話）</strong>は、仕様を「詰め切る」フェーズです。Matt Pocock さんの grill-me というスキルのプロトコルを拝借していて、決定事項をツリーとして扱い、<em>いま聞ける質問を全部まとめて 1 ラウンドで聞く</em>方式。しかも質問は選択肢 + 推奨付きの UI（AskUserQuestion）で来るので、ユーザーはポチポチ選ぶだけです。決まったことはその場で REQUIREMENTS.md（何を作るか）と DECISIONS.md（なぜそう決めたか・何を却下したか）に書き込まれます。</p>
   <p><strong>research → plan → impl → verify（無人）</strong>は、それぞれが独立した <code>claude -p</code> ターンです。research は類似 OSS や公式ドキュメントを調べて要件を補強し、plan は「1 ターンで実装 + テスト + コミットまで完結する粒度」のタスク列を作ります。impl は<em>1 ターンにつき 1 タスクだけ</em>。verify はマイルストーン全体の diff をレビュー + セキュリティチェックして、合格ならローカルでは main へ自動マージ、リモートがあるプロジェクトでは push して MR/PR を作成します。</p>
-  <h3>完了時は「マージ」か「MR」か — リモートの有無で自動判別</h3>
+  <h3>🔀 完了時は「マージ」か「MR」か — リモートの有無で自動判別</h3>
   <p>verify に合格したあとの仕上げは、リポジトリに <code>origin</code>（リモート）が設定されているかで自動的に切り替わります。</p>
   <ul class="principles">
     <li>
-      <span class="p-title">ローカルだけのリポジトリ → 自動マージ</span>
+      <span class="p-title">🏠 ローカルだけのリポジトリ → 自動マージ</span>
       <span class="p-body">ベースブランチ（main など）へ <code>--no-ff</code> でマージして完了。マージコミットが残るので、あとから「このマイルストーンで何が入ったか」を一目で追えます。衝突したときは自動で諦めて BLOCKED 停止します。</span>
     </li>
     <li>
-      <span class="p-title">リモートがあるリポジトリ → push + MR/PR 作成</span>
+      <span class="p-title">🌐 リモートがあるリポジトリ → push + MR/PR 作成</span>
       <span class="p-body">勝手にマージはしません。ブランチを push して MR / PR を自動作成し、そこで完了扱い。GitHub なら gh CLI、GitLab なら glab（なければ push オプションという GitLab のサーバー機能で代替）。<strong>マージボタンを押すのは人間か CI</strong> です。</span>
     </li>
   </ul>
   <p>個人の実験リポジトリでは朝には main が進んでいてほしいし、チームのリポジトリで AI が勝手に main を書き換えたら事故です。<em>「自動化の境界線をどこに引くか」をリポジトリの性質から推定する</em>、というのがこの分岐の意図です。</p>
-  <p>そして全体の司令塔が、この小さな state.json です。</p>
+  <p>そして全体の司令塔が、この小さな state.json です 🧭</p>
   <pre><code>{
   "milestone": "v2-edit-search-tags",
   "phase": "impl",
@@ -265,25 +265,25 @@
   <p>ループスクリプトは <code>next_command</code> を読んで実行するだけ。番兵値が <code>DONE</code> なら完走、<code>BLOCKED</code> なら人間の出番、として停止します。フェーズごとにモデルも切り替えていて、計画とレビューは上位モデル、実装は Sonnet、のようなコスト配分ができます。</p>
 
   <div class="callout blocked">
-    <span class="co-label">BLOCKED という設計思想</span>
+    <span class="co-label">🚧 BLOCKED という設計思想</span>
     無人区間の Claude が判断に迷ったとき、gsd-lite は「それっぽく進める」ことを許しません。状況・質問・選択肢と推奨を BLOCKED.md に書き残してループを停止し、人間が選択肢に答えたら再開する。自律実行の信頼性は「どれだけ賢く進めるか」より「<strong>どれだけ潔く止まるか</strong>」で決まる、というのが作ってみての実感です。
   </div>
 
   <p class="eyebrow">Use case</p>
-  <h2>実録：TODO アプリを一晩で 2 マイルストーン</h2>
+  <h2>🌃 実録：TODO アプリを一晩で 2 マイルストーン</h2>
   <p>絵に描いた餅では意味がないので、実際に走らせた記録をそのまま載せます。題材は Python 製の TODO 管理 CLI。まず discuss で「CLI か Web か」「保存は JSON か SQLite か」「エラーは traceback を見せず日本語メッセージ + exit 1」……といった質問に数ラウンド答えて、起動。ここから先は完全放置です。</p>
   <ul class="timeline">
-    <li><span class="t-turn">TURN 1–2</span><br><span class="t-title">research → plan</span><div class="t-body">標準ライブラリの調査を済ませ、4 タスクの計画を作成。各タスクに「テストで機械検証できる完了基準」付き。</div></li>
-    <li><span class="t-turn">TURN 3–6</span><br><span class="t-title">impl ×4 — add / list / done / delete を実装</span><div class="t-body">1 ターン 1 タスクで淡々と。毎ターン「実装コミット + 申し送りコミット」が git に刻まれていきます。</div></li>
-    <li class="warn"><span class="t-turn">TURN 7–11</span><br><span class="t-title">verify が 3 ラウンド連続でダメ出し</span><div class="t-body">「ID 採番が要件と違う」「壊れた JSON で traceback が漏れる」——本物の欠陥を検出して impl に差し戻し。3 回目で差し戻し上限に達し、BLOCKED で停止しました。</div></li>
-    <li><span class="t-turn">朝</span><br><span class="t-title">人間の出番：選択肢に 1 回答えるだけ</span><div class="t-body">BLOCKED.md には再現手順・影響度・選択肢 3 つと推奨まで揃っていました。「修正してマージ」を選んで再起動。</div></li>
+    <li><span class="t-turn">TURN 1–2</span><br><span class="t-title">🔍 research → 📋 plan</span><div class="t-body">標準ライブラリの調査を済ませ、4 タスクの計画を作成。各タスクに「テストで機械検証できる完了基準」付き。</div></li>
+    <li><span class="t-turn">TURN 3–6</span><br><span class="t-title">💻 impl ×4 — add / list / done / delete を実装</span><div class="t-body">1 ターン 1 タスクで淡々と。毎ターン「実装コミット + 申し送りコミット」が git に刻まれていきます。</div></li>
+    <li class="warn"><span class="t-turn">TURN 7–11</span><br><span class="t-title">⚠️ verify が 3 ラウンド連続でダメ出し</span><div class="t-body">「ID 採番が要件と違う」「壊れた JSON で traceback が漏れる」——本物の欠陥を検出して impl に差し戻し。3 回目で差し戻し上限に達し、BLOCKED で停止しました。</div></li>
+    <li><span class="t-turn">朝</span><br><span class="t-title">☕ 人間の出番：選択肢に 1 回答えるだけ</span><div class="t-body">BLOCKED.md には再現手順・影響度・選択肢 3 つと推奨まで揃っていました。「修正してマージ」を選んで再起動。</div></li>
     <li class="mint"><span class="t-turn">TURN 12–14</span><br><span class="t-title">修正 → verify 合格 → main に自動マージ 🎉</span><div class="t-body">テスト 45 件 green。マージコミットまで無人で完了しました。</div></li>
-    <li class="mint"><span class="t-turn">2 本目</span><br><span class="t-title">v2（編集・検索・タグ機能）は 9 ターンで一発合格</span><div class="t-body">discuss で「v1 のデータと後方互換にする」という注意点まで決めておいたら、verify を 1 ラウンドで通過。<em>対話の網羅性が、そのまま無人区間の品質になる</em>ことを体感しました。</div></li>
+    <li class="mint"><span class="t-turn">2 本目</span><br><span class="t-title">✌️ v2（編集・検索・タグ機能）は 9 ターンで一発合格</span><div class="t-body">discuss で「v1 のデータと後方互換にする」という注意点まで決めておいたら、verify を 1 ラウンドで通過。<em>対話の網羅性が、そのまま無人区間の品質になる</em>ことを体感しました。</div></li>
   </ul>
   <p>2 マイルストーン合計で 23 ターン。人間がやったことは「最初の対話」と「BLOCKED への回答 1 回」だけです。</p>
 
   <p class="eyebrow">How to use</p>
-  <h2>使い方：やることは実質 2 コマンド</h2>
+  <h2>🚀 使い方：やることは実質 2 コマンド</h2>
   <p>セットアップはリポジトリを clone して <code>./install.sh</code> を実行するだけ。あとは対象プロジェクトで Claude Code を開いて、こう打ちます。</p>
   <pre><code><span class="c"># プロジェクトごとに 1 回：足場を生成</span>
 &gt; /gsd-lite-init
@@ -291,13 +291,13 @@
 <span class="c"># マイルストーンごと：仕様を詰めて、そのまま起動まで</span>
 &gt; /gsd-lite-discuss 決済機能を追加したい</code></pre>
   <p>discuss の最後に「今すぐループを起動しますか？」と聞かれるので「はい」と答えれば、<strong>シェルコマンドを 1 行も打たずに</strong>無人ループが走り始めます（手動派は <code>gsd-lite-loop.sh</code> をターミナルで実行しても、Claude に「ループを起動して」と頼んでも OK）。</p>
-  <h3>進捗が気になる夜は</h3>
+  <h3>👀 進捗が気になる夜は</h3>
   <p>見守り方は 3 段階用意しました。トークンを消費しない <code>gsd-lite-loop.sh --status</code>（現在のフェーズ・ターン・作業中タスクを表示）、フェーズが変わるたびに通知を飛ばせる <code>on-phase</code> フック、そして Claude のセッション内で「フェーズが変わったときだけ 1 行報告」してくれる監視サブエージェント。ログを延々眺める必要はありません。</p>
-  <h3>朝、確認するのは終了コードだけ</h3>
+  <h3>🌅 朝、確認するのは終了コードだけ</h3>
   <div class="tbl-wrap">
     <table>
       <tr><th>exit</th><th>意味</th><th>やること</th></tr>
-      <tr><td>0</td><td>DONE</td><td>マージ済み（リモート運用なら MR 作成済み）。成果を眺めてニッコリ</td></tr>
+      <tr><td>0</td><td>DONE</td><td>マージ済み（リモート運用なら MR 作成済み）。成果を眺めてニッコリ 😊</td></tr>
       <tr><td>2</td><td>BLOCKED</td><td>BLOCKED.md を読んで判断 → コミットして再起動</td></tr>
       <tr><td>3</td><td>max_turns</td><td>上限到達。状況を見て上限を調整</td></tr>
       <tr><td>4</td><td>discuss 未完了</td><td>先に対話で仕様を確定させてね、の合図</td></tr>
@@ -305,17 +305,17 @@
   </div>
 
   <p class="eyebrow">Hardening</p>
-  <h2>おまけ：別の AI に 3 回殴ってもらった話</h2>
+  <h2>🥊 おまけ：別の AI に 3 回殴ってもらった話</h2>
   <p>完成後、Codex（別の AI エージェント）に敵対的レビューを 3 巡依頼したところ、合計 <strong>19 件</strong>の指摘を受けました。「完了状態がコミットされずに残る」「リモート運用で次の MR が前の MR を向く」「pid ファイルの排他に競合がある」……どれも自分では見つけられなかった、運用シナリオを静的に追わないと出てこない欠陥です。</p>
   <p>この修正の過程で、gsd-lite の最重要原則がひとつ結晶しました。<strong>「信頼するのはコミット済みの state だけ」</strong>。ターンが正常終了しても、commit まで到達していなければ進捗と認めない。ターン境界では作業ツリーを必ず HEAD に揃える。自律実行の状態管理は、結局 git に寄りかかるのがいちばん堅い、という結論です。</p>
 
   <p class="eyebrow">Wrap up</p>
-  <h2>まとめ</h2>
+  <h2>🎁 まとめ</h2>
   <p>gsd-lite が証明したかったのは、こういうことです。</p>
   <p><em>自律開発に必要なのは巨大なフレームワークではなく、「新品のコンテキスト」「何も考えないループ」「潔く止まる勇気」の 3 つで足りる。</em></p>
   <p>実体はシェルスクリプト 1 本 + Markdown のスキル 6 枚 + JSON 1 個。フック（通知）、フェーズ別モデル、リサーチ対象の選択など、育てしろも残してあります。worktree 分離やスキル動的生成は v2 のお楽しみ。</p>
   <div class="fin">
     <div class="fin-title">🌙 今夜から試すなら</div>
-    対象プロジェクトで <code>claude</code> を開いて、<code>/gsd-lite-init</code> → <code>/gsd-lite-discuss やりたいこと</code>。仕様を詰めたら、あとは寝るだけです。おやすみなさい。
+    対象プロジェクトで <code>claude</code> を開いて、<code>/gsd-lite-init</code> → <code>/gsd-lite-discuss やりたいこと</code>。仕様を詰めたら、あとは寝るだけです。おやすみなさい 💤
   </div>
 </main>
