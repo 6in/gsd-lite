@@ -4,6 +4,8 @@
 > 現行実装は `state.engine`（未指定: `claude`）または `GSD_LITE_ENGINE` で
 > `codex` も選択できる。Codex は `codex exec` と `.agents/skills/` を使い、
 > `codex.model.<phase>` / `codex.reasoning_effort.<phase>` で設定する。
+> discuss 終了時に実行パターンを選択し、`phase_engines.<phase>` でフェーズ別に
+> エンジンを上書きできる。`--check` は必要な全フェーズのCLI・スキルを事前検証する。
 > 状態遷移・コミットによる進捗判定・終了コードは共通。
 > 詳細なインストール・移行・権限設定は [README の Codex 手順](../README.md#codex-で使う) を参照。
 

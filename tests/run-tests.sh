@@ -15,6 +15,8 @@ assert_eq(){ [ "$2" = "$3" ] && ok "$1" || ng "$1 (expected [$3], got [$2])"; }
 make_project(){ # make_project <dir> — 足場コミット済みの git プロジェクトを作る
   rm -rf "$1"; mkdir -p "$1/.gsd-lite/hooks" "$1/.gsd-lite/logs"
   cd "$1"
+  mkdir -p .claude/skills
+  cp -r "$REPO_DIR/templates/skills/." .claude/skills/
   git init -q -b main
   git config user.email t@t; git config user.name t
   cat > .gsd-lite/state.json <<'EOF'
@@ -302,6 +304,58 @@ GSD_LITE_INSTALL_ROOT="$TESTROOT/default install" "$REPO_DIR/install.sh" > "$TES
 assert_eq "default install unchanged" "$?" "0"
 [ -f "$TESTROOT/default install/.claude/skills/gsd-lite-init/SKILL.md" ] && ok "default Claude init" || ng "default init missing"
 [ ! -e "$TESTROOT/default install/.codex" ] && ok "default does not install Codex" || ng "default created Codex"
+
+
+echo "== Test 15: フェーズ別パターン =="
+for pattern in impl verify both reverse; do
+  make_codex_project "$TESTROOT/mixed-$pattern"
+  case "$pattern" in
+    impl) mapping='{impl:"codex"}'; expected='2' ;;
+    verify) mapping='{verify:"codex"}'; expected='1' ;;
+    both) mapping='{impl:"codex",verify:"codex"}'; expected='3' ;;
+    reverse) mapping='{research:"codex",plan:"codex"}'; expected='2' ;;
+  esac
+  commit_state ".engine=\"claude\" | .phase_engines=$mapping"
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+  assert_eq "$pattern completes" "$?" "0"
+  assert_eq "$pattern Codex turn count" "$(grep -c '^exec$' .gsd-lite/stub-args.log)" "$expected"
+  assert_eq "$pattern total turns" "$(jq -r .turn .gsd-lite/state.json)" "5"
+  for phase in research plan impl verify; do
+    engine=$(jq -r --arg phase "$phase" '.phase_engines[$phase] // .engine' .gsd-lite/state.json)
+    grep -Fq "[$engine/$phase]" "$TESTROOT/loop-out.log" && ok "$pattern routes $phase" || ng "$pattern routes $phase"
+  done
+done
+
+echo "== Test 16: 実行前チェックは変更・起動しない =="
+make_codex_project "$TESTROOT/preflight"
+commit_state '.engine="claude" | .phase_engines={verify:"codex"}'
+before=$(git rev-parse HEAD)
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "mixed preflight passes" "$?" "0"
+assert_eq "check preserves commit" "$(git rev-parse HEAD)" "$before"
+assert_eq "check preserves worktree" "$(git status --porcelain | wc -l)" "0"
+[ ! -e .gsd-lite/stub-args.log ] && ok "check runs no agents" || ng "check started agent"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/missing" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "later missing CLI stops before research" "$?" "6"
+[ ! -e .gsd-lite/stub-args.log ] && ok "missing later CLI runs no turns" || ng "partial run"
+rm .agents/skills/gsd-lite-verify/SKILL.md
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "later missing skill fails preflight" "$?" "6"
+out=$("$LOOP" --status)
+echo "$out" | grep -q 'verify -> codex' && ok "status displays phase assignment" || ng "status assignment"
+
+echo "== Test 17: 環境変数の優先順位と設定値検証 =="
+make_codex_project "$TESTROOT/override-mixed"
+commit_state '.engine="claude" | .phase_engines={verify:"codex"} | .max_turns=1'
+GSD_LITE_ENGINE=codex GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" GSD_LITE_CLAUDE_BIN="$TESTROOT/missing" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "global override needs only Codex" "$?" "3"
+grep -q '\[codex/research\]' "$TESTROOT/loop-out.log" && ok "override wins over default" || ng "override routing"
+commit_state '.phase_engines={review:"codex"}'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "unknown phase rejected" "$?" "6"
+commit_state '.phase_engines={verify:"typo"}'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "unknown phase engine rejected" "$?" "6"
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

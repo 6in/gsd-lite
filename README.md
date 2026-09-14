@@ -79,7 +79,7 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 
 | 環境変数 | 用途 |
 |---|---|
-| `GSD_LITE_ENGINE` | state より優先して `claude` / `codex` を選択 |
+| `GSD_LITE_ENGINE` | 全フェーズを `claude` / `codex` に上書き（phase_engines より優先） |
 | `GSD_LITE_CODEX_BIN` | Codex 実行ファイル（既定: `codex`） |
 | `GSD_LITE_CODEX_MODEL` | Codex の全フェーズ共通モデル（state より優先） |
 | `GSD_LITE_CODEX_SANDBOX` | 既定: `workspace-write` |
@@ -97,6 +97,51 @@ Claude の allowlist は使わない。親環境や組織ポリシーによる�
 
 仕様の参照: [OpenAI公式・非対話実行](https://learn.chatgpt.com/docs/non-interactive-mode)、
 [スキル](https://learn.chatgpt.com/docs/build-skills)。
+
+## ループ開始前に実行パターンを選ぶ
+
+discuss の最後に、実行パターンを選んでからループを開始する。
+対話するホストは自由で、Claude Code で仕様を詰めて Codex に実装させることもできる。
+
+| パターン | 調査 | 計画 | 実装 | レビュー |
+|---|---|---|---|---|
+| すべて Claude | Claude | Claude | Claude | Claude |
+| すべて Codex | Codex | Codex | Codex | Codex |
+| 実装だけ Codex | Claude | Claude | Codex | Claude |
+| レビューだけ Codex | Claude | Claude | Claude | Codex |
+| 実装・レビューは Codex | Claude | Claude | Codex | Codex |
+
+カスタム指定や、現在の設定を維持する選択も可能。
+選択結果は `state.json` に保存して要件と一緒にコミットする。
+モデルはそのフェーズを実行するエンジンの設定を使う。
+
+レビューだけ Codex の保存例（state の一部）:
+
+```json
+{
+  "engine": "claude",
+  "phase_engines": { "verify": "codex" }
+}
+```
+
+優先順位は `GSD_LITE_ENGINE` → `phase_engines.<phase>` → `engine` → `claude`。
+プリセット変更時は `phase_engines` を置き換えるため、前回の割り当ては残らない。
+指定できるフェーズは `research` / `plan` / `impl` / `verify`。
+
+混在させる場合は `install.sh --engine all` で両方のテンプレートを導入する。
+discuss が選択したエンジン用のプロジェクトスキルを配置する
+（Claude: `.claude/skills/`、Codex: `.agents/skills/`）。
+CLI の認証と権限も起動前に準備しておく。
+
+```bash
+gsd-lite-loop.sh --check    # 全フェーズのCLI・スキル配置を確認（変更・起動なし）
+gsd-lite-loop.sh --status   # フェーズ別の実行先と進捗を表示
+```
+
+通常のループ起動でも実行前チェックを行う。後半で使うCLIやスキルが不足していれば
+最初のターンより前に終了コード6で停止する。認証・通信の疎通確認は含まない。
+ループ自体は対話せず、保存された組み合わせで毎ターン実行先を切り替える。
+既存プロジェクトは再インストール後、init でスキルを更新すると選択手順が反映される。
 
 ## テスト
 

@@ -1,6 +1,7 @@
 {
   "version": 1,
   "engine": "claude",
+  "phase_engines": {},
   "codex": { "model": {}, "reasoning_effort": {} },
   "milestone": "",
   "phase": "discuss",

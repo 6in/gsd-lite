@@ -32,7 +32,7 @@ Claude の AskUserQuestion や allowlist を Codex に要求しない。
    - 更新しない → 何もせず終了
    （gsd-lite 本体を更新した後、既存プロジェクトに反映するのはこの手順。
    install.sh はテンプレートを更新するだけで、配布済みプロジェクトには届かない）
-   Codex への追加導入でもスキル更新は可能。既存 state の engine / model は変更しない。
+   Codex への追加導入でもスキル更新は可能。既存 state の engine / phase_engines / model は変更しない。
    エンジン切り替えを依頼された場合だけ、ループ停止中に `engine: "codex"` を設定し、
    `codex.model` / `codex.reasoning_effort`（未設定なら空オブジェクト）を追加して
    別途コミットする。既存の phase・turn・成果物・Claude 用 model は保持する。
@@ -56,3 +56,9 @@ Claude の AskUserQuestion や allowlist を Codex に要求しない。
 6. **コミット**: 現在のブランチ（= 以後の base ブランチ）に
    `gsd-lite: scaffold` としてコミット
 7. **案内**: 「次は同じセッションで `/gsd-lite-discuss <やりたいこと>`」と伝えて終了
+
+## 実行パターン
+
+実行するエンジンの組み合わせは discuss の終了時、ループ開始前に選択する。
+init ではホスト用の足場だけでよい。discuss で混在を選んだら必要な両ホスト用スキルと
+Claude の allowlist を追加する。既存プロジェクトは init でスキル更新して反映する。

@@ -5,6 +5,7 @@
 #
 # 使い方:
 #   gsd-lite-loop.sh            # ループ実行（対象プロジェクトの直下で）
+#   gsd-lite-loop.sh --check    # 全フェーズの実行前提を検証（起動・変更なし）
 #   gsd-lite-loop.sh --status   # 進捗の整形表示（トークンゼロの覗き窓）
 #
 # 環境変数:
@@ -66,11 +67,58 @@ finish() { # finish <exit_code> — on-exit フックを呼んで終了
   exit "$code"
 }
 
+engine_for() {
+  if [ -n "${GSD_LITE_ENGINE:-}" ]; then
+    printf '%s\n' "$GSD_LITE_ENGINE"
+  else
+    jq -r --arg phase "$1" '.phase_engines[$phase] // .engine // "claude"' "$STATE"
+  fi
+}
+
+select_engine() {
+  ENGINE=$(engine_for "$1") || die "cannot read engine for $1"
+  case "$ENGINE" in
+    claude) AGENT_BIN="$CLAUDE_BIN" ;;
+    codex) AGENT_BIN="${GSD_LITE_CODEX_BIN:-codex}" ;;
+    *) die "unknown engine: $ENGINE (expected claude or codex)" ;;
+  esac
+}
+
+check_config() {
+  local check_phase skill_dir
+  jq -e '
+    (.engine // "claude" | . == "claude" or . == "codex") and
+    ((.phase_engines // {}) | type == "object" and
+      all(to_entries[];
+        (.key == "research" or .key == "plan" or .key == "impl" or .key == "verify") and
+        (.value == "claude" or .value == "codex")))
+  ' "$STATE" >/dev/null || die "invalid engine / phase_engines configuration"
+  CODEX_SANDBOX="${GSD_LITE_CODEX_SANDBOX:-workspace-write}"
+  for check_phase in research plan impl verify; do
+    select_engine "$check_phase"
+    command -v "$AGENT_BIN" >/dev/null || die "$ENGINE binary not found: $AGENT_BIN (phase: $check_phase)"
+    if [ "$ENGINE" = codex ]; then
+      skill_dir=.agents/skills
+      case "$CODEX_SANDBOX" in
+        read-only|workspace-write|danger-full-access) ;;
+        *) die "invalid Codex sandbox: $CODEX_SANDBOX" ;;
+      esac
+    else
+      skill_dir=.claude/skills
+    fi
+    [ -f "$skill_dir/gsd-lite-$check_phase/SKILL.md" ] ||
+      die "missing $skill_dir/gsd-lite-$check_phase/SKILL.md (update project skills before starting)"
+  done
+}
+
 status() {
   [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first)"
   echo "== gsd-lite status =="
   echo "engine    : ${GSD_LITE_ENGINE:-$(sget '.engine // "claude"')}"
   jq -r '"milestone : \(.milestone)\nphase     : \(.phase)\nturn      : \(.turn)/\(.max_turns)\nnext      : \(.next_command)\nverify    : round \(.verify_round)/\(.verify_round_max)\nbranch    : \(.branch.name) (base: \(.branch.base))\nupdated   : \(.updated_at)"' "$STATE"
+  for display_phase in research plan impl verify; do
+    echo "route     : $display_phase -> $(engine_for "$display_phase")"
+  done
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo "loop      : RUNNING (pid $(cat "$PIDFILE"))"
@@ -95,28 +143,21 @@ status() {
 
 case "${1:-}" in
   --status) status; exit 0 ;;
+  --check)
+    command -v jq >/dev/null || die "jq is required"
+    [ -f "$STATE" ] || die "no $STATE here"
+    check_config
+    echo "gsd-lite: execution configuration ready"
+    exit 0 ;;
   "") ;;
-  *) die "unknown option: $1 (supported: --status)" ;;
+  *) die "unknown option: $1 (supported: --status, --check)" ;;
 esac
 
 command -v jq >/dev/null || die "jq is required"
 command -v timeout >/dev/null || die "timeout (coreutils) is required"
 command -v flock >/dev/null || die "flock (util-linux) is required"
 [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first, from the project root)"
-ENGINE="${GSD_LITE_ENGINE:-$(sget '.engine // "claude"')}"
-case "$ENGINE" in
-  claude) AGENT_BIN="$CLAUDE_BIN" ;;
-  codex) AGENT_BIN="${GSD_LITE_CODEX_BIN:-codex}" ;;
-  *) die "unknown engine: $ENGINE (expected claude or codex)" ;;
-esac
-command -v "$AGENT_BIN" >/dev/null || die "$ENGINE binary not found: $AGENT_BIN"
-CODEX_SANDBOX="${GSD_LITE_CODEX_SANDBOX:-workspace-write}"
-if [ "$ENGINE" = codex ]; then
-  case "$CODEX_SANDBOX" in
-    read-only|workspace-write|danger-full-access) ;;
-    *) die "invalid Codex sandbox: $CODEX_SANDBOX" ;;
-  esac
-fi
+check_config
 git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository"
 git show "HEAD:$STATE" >/dev/null 2>&1 || die "$STATE is not committed (commit it first — the loop trusts committed state only)"
 if ! git diff --quiet -- "$STATE" 2>/dev/null; then
@@ -152,6 +193,7 @@ while true; do
   fi
 
   phase=$(sget '.phase')
+  select_engine "$phase"
   retry=$(get_retry)
   if [ "$ENGINE" = codex ]; then
     model="${GSD_LITE_CODEX_MODEL:-$(jq -r --arg phase "$phase" '.codex.model[$phase] // empty' "$STATE")}"
