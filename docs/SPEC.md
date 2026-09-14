@@ -1,5 +1,13 @@
 # gsd-lite 設計書 (SPEC)
 
+> Codex 対応追補: 本文の Claude Code 専用コマンド・配置例は従来エンジンの仕様。
+> 現行実装は `state.engine`（未指定: `claude`）または `GSD_LITE_ENGINE` で
+> `codex` も選択できる。Codex は `codex exec` と `.agents/skills/` を使い、
+> `codex.model.<phase>` / `codex.reasoning_effort.<phase>` で設定する。
+> 状態遷移・コミットによる進捗判定・終了コードは共通。
+> 詳細なインストール・移行・権限設定は [README の Codex 手順](../README.md#codex-で使う) を参照。
+
+
 - 作成日: 2026-09-09
 - ステータス: v0.7 — 進捗監視 3 層（--status / on-phase フック / 監視サブエージェント）を追加
 - 参考: [mattpocock/skills](https://github.com/mattpocock/skills) の grilling / grill-with-docs / domain-modeling

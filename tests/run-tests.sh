@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# gsd-lite-loop.sh のドライランテスト（claude をスタブ化、トークン消費なし）
+# gsd-lite-loop.sh のドライランテスト（Claude / Codex をスタブ化、トークン消費なし）
 set -u
 TESTROOT=$(mktemp -d /tmp/gsd-lite-test.XXXXXX)
 trap 'rm -rf "$TESTROOT"' EXIT
 LOOP=$(cd "$(dirname "$0")/.." && pwd)/bin/gsd-lite-loop.sh
+REPO_DIR=$(dirname "$(dirname "$LOOP")")
+# 呼び出し元のエンジン設定をテストに持ち込まない。
+unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 ng(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -167,5 +170,138 @@ assert_eq "committed advance + rc=1 -> DONE (exit 0)" "$?" "0"
 assert_eq "committed turn is 1" "$(jq -r .turn .gsd-lite/state.json)" "1"
 
 echo ""
+
+# Codex の argv を行単位で記録し、同じ状態遷移スタブに委譲する。
+cat > "$TESTROOT/bin/codex-happy" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> .gsd-lite/stub-args.log
+[ "$1" = exec ] || exit 91
+prompt="${!#}"
+case "$prompt" in
+  '$gsd-lite-research '*) cmd=/gsd-lite-research ;;
+  '$gsd-lite-plan '*) cmd=/gsd-lite-plan ;;
+  '$gsd-lite-impl '*) cmd=/gsd-lite-impl ;;
+  '$gsd-lite-verify '*) cmd=/gsd-lite-verify ;;
+  *) exit 92 ;;
+esac
+[ -f ".agents/skills/${cmd#/}/SKILL.md" ] || exit 93
+# stdin が親の入力を読み込まないことも検証する。
+if read -r unexpected; then exit 94; fi
+exec "$(dirname "$0")/claude-happy" -p "$cmd"
+EOF
+chmod +x "$TESTROOT/bin/codex-happy"
+
+make_codex_project(){
+  make_project "$1"
+  mkdir -p .agents/skills
+  cp -r "$REPO_DIR/templates/skills/." .agents/skills/
+  t=$(mktemp)
+  jq '.engine="codex" | .codex.model={research:"codex-research-stub",plan:"codex-plan-stub",impl:"codex-impl-stub",verify:"codex-verify-stub"} | .codex.reasoning_effort={plan:"high"}' .gsd-lite/state.json > "$t"
+  mv "$t" .gsd-lite/state.json
+  git add -A && git commit -qm "configure codex"
+}
+commit_state(){
+  t=$(mktemp)
+  jq "$1" .gsd-lite/state.json > "$t" && mv "$t" .gsd-lite/state.json
+  git add .gsd-lite/state.json && git commit -qm "configure test"
+}
+
+echo "== Test 8: Codex フルサイクルとモデル設定 =="
+make_codex_project "$TESTROOT/codex project"
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "Codex DONE" "$?" "0"
+assert_eq "Codex turns" "$(jq -r .turn .gsd-lite/state.json)" "5"
+for value in exec workspace-write 'approval_policy="never"' 'model_reasoning_effort="high"' codex-research-stub codex-plan-stub codex-impl-stub codex-verify-stub "$(git rev-parse --absolute-git-dir)"; do
+  grep -Fxq -- "$value" .gsd-lite/stub-args.log && ok "Codex argv: $value" || ng "Codex argv: $value"
+done
+grep -Eq 'sonnet-stub|opus-stub|permission-mode' .gsd-lite/stub-args.log && ng "Claude flags leaked" || ok "no Claude flags/models in Codex"
+assert_eq "Codex clean worktree" "$(git status --porcelain | wc -l)" "0"
+out=$("$LOOP" --status)
+echo "$out" | grep -q 'engine    : codex' && ok "status shows engine" || ng "status engine"
+
+echo "== Test 9: 旧 state の Codex override と既定モデル =="
+make_codex_project "$TESTROOT/c9"
+commit_state 'del(.engine, .codex) | .max_turns=1'
+GSD_LITE_ENGINE=codex GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "engine override ran one turn" "$?" "3"
+grep -Fxq -- '--model' .gsd-lite/stub-args.log && ng "default model should be omitted" || ok "CLI default model"
+commit_state '.max_turns=2'
+GSD_LITE_ENGINE=codex GSD_LITE_CODEX_MODEL="custom model" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "model override ran" "$?" "3"
+grep -Fxq 'custom model' .gsd-lite/stub-args.log && ok "model is one argument" || ng "model quoting"
+
+echo "== Test 10: Codex エラーとコミット契約 =="
+make_codex_project "$TESTROOT/c10"
+GSD_LITE_ENGINE=unknown "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "unknown engine rejected" "$?" "6"
+GSD_LITE_CODEX_BIN="$TESTROOT/missing" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "missing Codex rejected" "$?" "6"
+GSD_LITE_CODEX_SANDBOX=invalid GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "invalid sandbox rejected" "$?" "6"
+commit_state '.retry_max=0'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/claude-ok-nocommit" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "Codex uncommitted progress blocked" "$?" "2"
+assert_eq "Codex blocked state committed" "$(git show HEAD:.gsd-lite/state.json | jq -r .next_command)" "BLOCKED"
+make_codex_project "$TESTROOT/c10missing"
+rm .agents/skills/gsd-lite-research/SKILL.md
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "missing Codex skill rejected" "$?" "6"
+[ ! -f .gsd-lite/loop.pid ] && ok "failed setup cleans pidfile" || ng "stale pidfile"
+
+echo "== Test 11: インストール先の分離と再インストール =="
+install_root="$TESTROOT/install root"
+GSD_LITE_INSTALL_ROOT="$install_root" "$REPO_DIR/install.sh" --engine codex > "$TESTROOT/install.log" 2>&1
+assert_eq "Codex install succeeded" "$?" "0"
+[ -f "$install_root/.agents/skills/gsd-lite-init/SKILL.md" ] && ok "Codex init installed" || ng "Codex init missing"
+[ ! -e "$install_root/.claude" ] && ok "Codex-only install" || ng "Claude directory created"
+[ ! -e "$install_root/.codex/gsd-lite/templates/settings.allowlist.json" ] && ok "no Claude allowlist in Codex" || ng "Claude allowlist copied"
+assert_eq "Codex template engine" "$(jq -r .engine "$install_root/.codex/gsd-lite/templates/state.json")" "codex"
+mkdir -p "$install_root/.agents/skills/unrelated"
+echo keep > "$install_root/.agents/skills/unrelated/SKILL.md"
+GSD_LITE_INSTALL_ROOT="$install_root" "$REPO_DIR/install.sh" --engine all > "$TESTROOT/install.log" 2>&1
+assert_eq "both engines reinstall" "$?" "0"
+assert_eq "unrelated skill preserved" "$(cat "$install_root/.agents/skills/unrelated/SKILL.md")" "keep"
+assert_eq "Claude template engine" "$(jq -r .engine "$install_root/.claude/gsd-lite/templates/state.json")" "claude"
+GSD_LITE_INSTALL_ROOT="$install_root" "$REPO_DIR/install.sh" --engine invalid > "$TESTROOT/install.log" 2>&1
+assert_eq "invalid install option" "$?" "1"
+
+
+echo "== Test 12: linked worktree の Git 管理パス =="
+make_codex_project "$TESTROOT/c12"
+commit_state '.max_turns=1'
+git worktree add -q -b linked "$TESTROOT/linked project"
+cd "$TESTROOT/linked project"
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "Codex worktree turn completed" "$?" "3"
+for value in "$(git rev-parse --absolute-git-dir)" "$(cd "$(git rev-parse --git-common-dir)" && pwd)"; do
+  grep -Fxq -- "$value" .gsd-lite/stub-args.log && ok "worktree writable Git path: $value" || ng "worktree Git path missing"
+done
+
+echo "== Test 13: Codex timeout =="
+cat > "$TESTROOT/bin/codex-hang" <<'EOF'
+#!/usr/bin/env bash
+exec sleep 10
+EOF
+chmod +x "$TESTROOT/bin/codex-hang"
+make_codex_project "$TESTROOT/c13"
+commit_state '.retry_max=0'
+GSD_LITE_TURN_TIMEOUT=1 GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-hang" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "Codex timeout -> BLOCKED" "$?" "2"
+grep -q 'rc=124' "$TESTROOT/loop-out.log" && ok "timeout exit recognized" || ng "timeout exit missing"
+assert_eq "timeout blocked committed" "$(git show HEAD:.gsd-lite/state.json | jq -r .next_command)" "BLOCKED"
+
+echo "== Test 14: Codex 設定値とコマンド検証 =="
+make_codex_project "$TESTROOT/c14"
+commit_state '.codex.reasoning_effort.research="bad"'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "invalid reasoning effort rejected" "$?" "6"
+commit_state '.codex.reasoning_effort={} | .next_command="/../../outside"'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "skill traversal rejected" "$?" "6"
+GSD_LITE_INSTALL_ROOT="$TESTROOT/default install" "$REPO_DIR/install.sh" > "$TESTROOT/install.log" 2>&1
+assert_eq "default install unchanged" "$?" "0"
+[ -f "$TESTROOT/default install/.claude/skills/gsd-lite-init/SKILL.md" ] && ok "default Claude init" || ng "default init missing"
+[ ! -e "$TESTROOT/default install/.codex" ] && ok "default does not install Codex" || ng "default created Codex"
+
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

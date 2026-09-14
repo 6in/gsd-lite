@@ -1,6 +1,6 @@
 ---
 name: gsd-lite-research
-description: gsd-lite のリサーチフェーズ（無人ループから claude -p で起動）。discuss の決定を類似 OSS・公式ドキュメント・過去プロジェクトの調査で補強し、RESEARCH.md を産出する。
+description: gsd-lite のリサーチフェーズ（無人ループから Claude Code / Codex で起動）。discuss の決定を類似 OSS・公式ドキュメント・過去プロジェクトの調査で補強し、RESEARCH.md を産出する。
 disable-model-invocation: true
 ---
 

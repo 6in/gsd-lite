@@ -8,6 +8,10 @@
 #   gsd-lite-loop.sh --status   # 進捗の整形表示（トークンゼロの覗き窓）
 #
 # 環境変数:
+#   GSD_LITE_ENGINE            claude / codex（未指定時 state.engine、旧 state は claude）
+#   GSD_LITE_CODEX_BIN         codex バイナリの上書き
+#   GSD_LITE_CODEX_MODEL       Codex の全フェーズ共通モデル（state.codex.model より優先）
+#   GSD_LITE_CODEX_SANDBOX     Codex sandbox（デフォルト workspace-write）
 #   GSD_LITE_CLAUDE_BIN        claude バイナリの上書き（テスト用スタブ差し込み）
 #   GSD_LITE_PERMISSION_MODE   claude -p の --permission-mode（デフォルト acceptEdits）
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
@@ -65,6 +69,7 @@ finish() { # finish <exit_code> — on-exit フックを呼んで終了
 status() {
   [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first)"
   echo "== gsd-lite status =="
+  echo "engine    : ${GSD_LITE_ENGINE:-$(sget '.engine // "claude"')}"
   jq -r '"milestone : \(.milestone)\nphase     : \(.phase)\nturn      : \(.turn)/\(.max_turns)\nnext      : \(.next_command)\nverify    : round \(.verify_round)/\(.verify_round_max)\nbranch    : \(.branch.name) (base: \(.branch.base))\nupdated   : \(.updated_at)"' "$STATE"
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -97,8 +102,21 @@ esac
 command -v jq >/dev/null || die "jq is required"
 command -v timeout >/dev/null || die "timeout (coreutils) is required"
 command -v flock >/dev/null || die "flock (util-linux) is required"
-command -v "$CLAUDE_BIN" >/dev/null || die "claude binary not found: $CLAUDE_BIN"
 [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first, from the project root)"
+ENGINE="${GSD_LITE_ENGINE:-$(sget '.engine // "claude"')}"
+case "$ENGINE" in
+  claude) AGENT_BIN="$CLAUDE_BIN" ;;
+  codex) AGENT_BIN="${GSD_LITE_CODEX_BIN:-codex}" ;;
+  *) die "unknown engine: $ENGINE (expected claude or codex)" ;;
+esac
+command -v "$AGENT_BIN" >/dev/null || die "$ENGINE binary not found: $AGENT_BIN"
+CODEX_SANDBOX="${GSD_LITE_CODEX_SANDBOX:-workspace-write}"
+if [ "$ENGINE" = codex ]; then
+  case "$CODEX_SANDBOX" in
+    read-only|workspace-write|danger-full-access) ;;
+    *) die "invalid Codex sandbox: $CODEX_SANDBOX" ;;
+  esac
+fi
 git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository"
 git show "HEAD:$STATE" >/dev/null 2>&1 || die "$STATE is not committed (commit it first — the loop trusts committed state only)"
 if ! git diff --quiet -- "$STATE" 2>/dev/null; then
@@ -111,6 +129,7 @@ mkdir -p "$GSD_DIR/logs"
 exec 9>"$LOCKFILE"
 flock -n 9 || die "loop already running (lock: $LOCKFILE)"
 echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
 trap 'finish 130' INT TERM
 
 while true; do
@@ -134,21 +153,51 @@ while true; do
 
   phase=$(sget '.phase')
   retry=$(get_retry)
-  model=$(sget ".model.\"$phase\" // empty")
+  if [ "$ENGINE" = codex ]; then
+    model="${GSD_LITE_CODEX_MODEL:-$(jq -r --arg phase "$phase" '.codex.model[$phase] // empty' "$STATE")}"
+  else
+    model=$(jq -r --arg phase "$phase" '.model[$phase] // empty' "$STATE")
+  fi
   milestone=$(sget '.milestone // empty')
   logdir="$GSD_DIR/logs/${milestone:-default}"   # マイルストーン別に分けて上書きを防ぐ
   mkdir -p "$logdir"
   log="$logdir/turn-$(printf '%03d' $((turn_before + 1)))-attempt$((retry + 1)).log"
 
-  echo "gsd-lite: turn $((turn_before + 1)) [$phase] $cmd (attempt $((retry + 1)))"
+  agent_args=()
+  if [ "$ENGINE" = codex ]; then
+    # state の /command 表現は共有。Codex には明示的なスキル参照を渡す。
+    skill_name="${cmd#/}"
+    case "$skill_name" in
+      ''|*[!a-zA-Z0-9_-]*) die "invalid Codex skill command: $cmd" ;;
+    esac
+    skill_file=".agents/skills/$skill_name/SKILL.md"
+    [ -f "$skill_file" ] || die "missing $skill_file (run \$gsd-lite-init in Codex first)"
+    agent_args=(exec --sandbox "$CODEX_SANDBOX" -c 'approval_policy="never"')
+    # state の commit が進捗の契約。通常 repo と linked worktree の両方を扱う。
+    agent_args+=(--add-dir "$(git rev-parse --absolute-git-dir)")
+    git_common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+    agent_args+=(--add-dir "$git_common_dir")
+    effort=$(jq -r --arg phase "$phase" '.codex.reasoning_effort[$phase] // empty' "$STATE")
+    if [ -n "$effort" ]; then
+      case "$effort" in
+        none|minimal|low|medium|high|xhigh|max|ultra) ;;
+        *) die "invalid Codex reasoning effort: $effort" ;;
+      esac
+      agent_args+=(-c "model_reasoning_effort=\"$effort\"")
+    fi
+    [ -z "$model" ] || agent_args+=(--model "$model")
+    agent_args+=("\$$skill_name — Read $skill_file and execute exactly one unattended turn. Follow its state update and git commit procedure. If blocked, record the reason in .gsd-lite/BLOCKED.md and commit the blocked state.")
+  else
+    agent_args=(-p "$cmd" --permission-mode "$PERMISSION_MODE")
+    [ -z "$model" ] || agent_args+=(--model "$model")
+  fi
+  echo "gsd-lite: turn $((turn_before + 1)) [$ENGINE/$phase] $cmd (attempt $((retry + 1)))"
   # 親が Claude Code セッションでもネスト起動できるよう、セッション由来の環境変数を除去。
   # timeout でハングを検知し（超過は kill）、進捗なし→リトライ経路に乗せる
   env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     timeout -k 30 "${GSD_LITE_TURN_TIMEOUT:-3600}" \
-    "$CLAUDE_BIN" -p "$cmd" \
-    ${model:+--model "$model"} \
-    --permission-mode "$PERMISSION_MODE" \
-    > "$log" 2>&1 9>&-
+    "$AGENT_BIN" "${agent_args[@]}" \
+    < /dev/null > "$log" 2>&1 9>&-
   rc=$?
 
   # 進捗判定は rc に依らず「コミット済み (HEAD) の state」で行う。

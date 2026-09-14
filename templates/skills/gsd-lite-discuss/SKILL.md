@@ -12,6 +12,21 @@ disable-model-invocation: true
 
 引数があればそれがマイルストーンの初期要望。なければまず要望を聞く。
 
+## ホストへの適応
+
+- Claude Code は `/gsd-lite-discuss`、Codex は `$gsd-lite-discuss` で呼び出す。
+- 以下の AskUserQuestion / AUQ は対話による確認を意味する。Codex では利用可能な
+  質問ツールの制限に合わせて分割し、利用できなければ通常の対話で質問する。
+  multiSelect がなければ複数項目をテキストで答えてもらう。
+- state の `next_command` はエンジン共通で `/gsd-lite-...` のまま。
+  ループが Codex のスキル参照へ変換する。
+- state の `engine` とモデル設定を確認してから起動する。Codex のモデルは
+  `codex.model.<phase>`、推論強度は `codex.reasoning_effort.<phase>`。
+  空なら Codex CLI の設定を使用する。
+- 次のマイルストーンに移るときも `engine` / `model` / `codex` は保持する。
+- 監視用サブエージェントが利用できない場合は `gsd-lite-loop.sh --status` で
+  確認する方法を案内する。
+
 ## 0. 進行中チェック → ブランチ整理 → 退避（この順で）
 
 **0-0. 進行中チェック（ブランチを動かす前に最初に行う）**: 現在の
@@ -77,7 +92,7 @@ VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、
 ## 5. 終了シーケンス
 
 1. フロンティアが空になるまでラウンドを繰り返す
-2. 仕上げチェック: 「plan フェーズの Claude が新規コンテキストで REQUIREMENTS.md と
+2. 仕上げチェック: 「plan フェーズのエージェントが新規コンテキストで REQUIREMENTS.md と
    DECISIONS.md **だけ**を読んで、ユーザーに質問せず計画を立てられるか」を自問し、
    足りなければフロンティアに戻す
 3. 最終 AUQ で以下を確認する:
