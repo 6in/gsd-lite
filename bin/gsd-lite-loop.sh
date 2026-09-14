@@ -7,6 +7,7 @@
 #   gsd-lite-loop.sh            # ループ実行（対象プロジェクトの直下で）
 #   gsd-lite-loop.sh --check    # 全フェーズの実行前提を検証（起動・変更なし）
 #   gsd-lite-loop.sh --status   # 進捗の整形表示（トークンゼロの覗き窓）
+#   gsd-lite-loop.sh --stop     # 現在のターン終了後に中断を依頼
 #
 # 環境変数:
 #   GSD_LITE_ENGINE            claude / codex（未指定時 state.engine、旧 state は claude）
@@ -26,6 +27,7 @@
 # してから起動すること（未コミットの編集はターン失敗時に巻き戻る）。
 #
 # 終了コード: 0=DONE / 2=BLOCKED / 3=max_turns / 4=discuss未完了 / 5=state異常 / 6=前提エラー
+#             7=一時中断（通常起動でフラグを消して再開）
 
 set -u
 
@@ -34,6 +36,7 @@ STATE="$GSD_DIR/state.json"
 PIDFILE="$GSD_DIR/loop.pid"        # 情報表示用（排他は flock が担う）
 LOCKFILE="$GSD_DIR/logs/.lock"     # logs/ は gitignore 済み
 RETRYFILE="$GSD_DIR/logs/.retry"
+STOPFILE="$GSD_DIR/logs/.stop"    # 実行時情報。gitignore 済み logs/ に置く
 CLAUDE_BIN="${GSD_LITE_CLAUDE_BIN:-claude}"
 PERMISSION_MODE="${GSD_LITE_PERMISSION_MODE:-acceptEdits}"
 
@@ -120,6 +123,11 @@ status() {
     echo "route     : $display_phase -> $(engine_for "$display_phase")"
   done
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
+  if [ -f "$STOPFILE" ]; then
+    echo "stop      : requested (cleared on next start)"
+  else
+    echo "stop      : not requested"
+  fi
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo "loop      : RUNNING (pid $(cat "$PIDFILE"))"
   else
@@ -142,6 +150,12 @@ status() {
 # ---- entry ----
 
 case "${1:-}" in
+  --stop)
+    [ -f "$STATE" ] || die "no $STATE here"
+    mkdir -p "$GSD_DIR/logs" || die "cannot create logs directory"
+    touch "$STOPFILE" || die "cannot create $STOPFILE"
+    echo "gsd-lite: stop requested; the active turn will finish before stopping"
+    exit 0 ;;
   --status) status; exit 0 ;;
   --check)
     command -v jq >/dev/null || die "jq is required"
@@ -150,7 +164,7 @@ case "${1:-}" in
     echo "gsd-lite: execution configuration ready"
     exit 0 ;;
   "") ;;
-  *) die "unknown option: $1 (supported: --status, --check)" ;;
+  *) die "unknown option: $1 (supported: --status, --check, --stop)" ;;
 esac
 
 command -v jq >/dev/null || die "jq is required"
@@ -169,6 +183,8 @@ mkdir -p "$GSD_DIR/logs"
 # 二重起動ガード: flock はプロセス終了で自動解放されるため stale 問題も競合窓もない
 exec 9>"$LOCKFILE"
 flock -n 9 || die "loop already running (lock: $LOCKFILE)"
+# 必ず排他取得後に消す。二重起動の失敗で稼働中ループへの中断依頼を消さない。
+rm -f "$STOPFILE" || die "cannot clear $STOPFILE"
 echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
 trap 'finish 130' INT TERM
@@ -182,6 +198,13 @@ while true; do
     DISCUSS) echo "gsd-lite: run /gsd-lite-discuss in an interactive session first"; finish 4 ;;
     *)       echo "gsd-lite: unknown next_command: $cmd" >&2; finish 5 ;;
   esac
+
+  # ターン境界だけで中断する。state の正規化・commit 検証は前ターンで完了済み。
+  # DONE / BLOCKED 等の終端を優先し、phase / next_command / retry は変更しない。
+  if [ -f "$STOPFILE" ]; then
+    echo "gsd-lite: paused; run gsd-lite-loop.sh to resume from $cmd"
+    finish 7
+  fi
 
   # 実行前に上限を判定する（DONE / BLOCKED の番兵は上で判定済みなので終端状態が優先される。
   # 上限到達済み state からの再起動で 1 ターン余計に実行しない）

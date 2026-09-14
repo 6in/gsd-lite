@@ -357,5 +357,95 @@ commit_state '.phase_engines={verify:"typo"}'
 GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/loop-out.log" 2>&1
 assert_eq "unknown phase engine rejected" "$?" "6"
 
+
+echo "== Test 18: ターン終了で中断し次のターンから再開 =="
+# 外部から中断依頼するまでコミットせず待つ。上限付きなので失敗時にもハングしない。
+for pause_engine in claude codex; do
+  cat > "$TESTROOT/bin/$pause_engine-gated" <<EOF
+#!/usr/bin/env bash
+touch .gsd-lite/logs/started
+for ((i=0; i<200; i++)); do
+  if [ -f .gsd-lite/logs/release ]; then
+    exec "$TESTROOT/bin/$pause_engine-happy" "\$@"
+  fi
+  sleep 0.05
+done
+exit 98
+EOF
+  chmod +x "$TESTROOT/bin/$pause_engine-gated"
+  make_codex_project "$TESTROOT/pause-$pause_engine"
+  commit_state ".engine=\"$pause_engine\""
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-gated" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-gated" "$LOOP" > "$TESTROOT/pause.log" 2>&1 &
+  pause_pid=$!
+  for ((i=0; i<100; i++)); do
+    [ -f .gsd-lite/logs/started ] && break
+    sleep 0.05
+  done
+  [ -f .gsd-lite/logs/started ] && ok "$pause_engine turn started" || ng "$pause_engine startup"
+  "$LOOP" --stop > /dev/null
+  assert_eq "$pause_engine request accepted" "$?" "0"
+  "$LOOP" --stop > /dev/null
+  assert_eq "$pause_engine repeated request accepted" "$?" "0"
+  kill -0 "$pause_pid" 2>/dev/null && ok "$pause_engine active turn not killed" || ng "$pause_engine interrupted mid-turn"
+  assert_eq "$pause_engine still waiting before commit" "$(jq -r .turn .gsd-lite/state.json)" "0"
+  out=$("$LOOP" --status)
+  echo "$out" | grep -q 'stop      : requested' && ok "$pause_engine pending status" || ng "$pause_engine pending status"
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > /dev/null
+  [ -f .gsd-lite/logs/.stop ] && ok "$pause_engine check preserves request" || ng "$pause_engine check cleared request"
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/duplicate.log" 2>&1
+  assert_eq "$pause_engine duplicate start rejected" "$?" "6"
+  [ -f .gsd-lite/logs/.stop ] && ok "$pause_engine duplicate preserves request" || ng "$pause_engine lost request"
+  touch .gsd-lite/logs/release
+  wait "$pause_pid"
+  assert_eq "$pause_engine paused exit" "$?" "7"
+  assert_eq "$pause_engine committed current turn" "$(git show HEAD:.gsd-lite/state.json | jq -r .turn)" "1"
+  assert_eq "$pause_engine next command preserved" "$(jq -r .next_command .gsd-lite/state.json)" "/gsd-lite-plan"
+  assert_eq "$pause_engine exit hook" "$(grep -c 'exit code=7 phase=plan' .gsd-lite/hooks.log)" "1"
+  [ ! -e .gsd-lite/loop.pid ] && ok "$pause_engine pid removed" || ng "$pause_engine stale pid"
+  assert_eq "$pause_engine stop flag not committed" "$(git status --porcelain | wc -l)" "0"
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/resume.log" 2>&1
+  assert_eq "$pause_engine resumed to DONE" "$?" "0"
+  assert_eq "$pause_engine no repeated completed turn" "$(jq -r .turn .gsd-lite/state.json)" "5"
+  [ ! -e .gsd-lite/logs/.stop ] && ok "$pause_engine resume clears flag" || ng "$pause_engine stale flag"
+  assert_eq "$pause_engine first turn executed once" "$(grep -c 'ARGS:.*-p /gsd-lite-research' .gsd-lite/stub-args.log)" "1"
+done
+
+echo "== Test 19: 失敗したターンの後も中断可能、retry を保持 =="
+cat > "$TESTROOT/bin/pause-no-progress" <<'EOF'
+#!/usr/bin/env bash
+touch .gsd-lite/logs/.stop
+t=$(mktemp)
+jq '.turn+=1' .gsd-lite/state.json > "$t" && mv "$t" .gsd-lite/state.json
+exit 1
+EOF
+chmod +x "$TESTROOT/bin/pause-no-progress"
+make_project "$TESTROOT/pause-retry"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/pause-no-progress" "$LOOP" > "$TESTROOT/pause.log" 2>&1
+assert_eq "failed attempt pauses before retry" "$?" "7"
+assert_eq "uncommitted state normalized before pause" "$(jq -r .turn .gsd-lite/state.json)" "0"
+assert_eq "retry preserved" "$(cat .gsd-lite/logs/.retry)" "1"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/missing" "$LOOP" > "$TESTROOT/pause.log" 2>&1
+assert_eq "failed startup rejected" "$?" "6"
+[ -f .gsd-lite/logs/.stop ] && ok "failed startup preserves stop" || ng "failed startup cleared stop"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/resume.log" 2>&1
+assert_eq "failed task can resume" "$?" "0"
+[ -f .gsd-lite/logs/toy/turn-001-attempt2.log ] && ok "resume preserves attempt history" || ng "retry overwritten"
+
+echo "== Test 20: 終端は中断より優先 =="
+for terminal in done blocked; do
+  make_project "$TESTROOT/pause-terminal-$terminal"
+  if [ "$terminal" = done ]; then terminal_stub=claude-fail-commit; expected_exit=0
+  else terminal_stub=claude-blocker; expected_exit=2
+  fi
+  cat > "$TESTROOT/bin/pause-terminal" <<EOF
+#!/usr/bin/env bash
+touch .gsd-lite/logs/.stop
+exec "$TESTROOT/bin/$terminal_stub"
+EOF
+  chmod +x "$TESTROOT/bin/pause-terminal"
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/pause-terminal" "$LOOP" > "$TESTROOT/pause.log" 2>&1
+  assert_eq "$terminal wins over pause" "$?" "$expected_exit"
+done
+
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
