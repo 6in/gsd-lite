@@ -23,6 +23,9 @@ Claude の AskUserQuestion や allowlist を Codex に要求しない。
 1. **前提確認**:
    - カレントがプロジェクトルートであること（ユーザーに一言確認してよい）
    - git リポジトリであること。違えば `git init` を提案して実行
+   - git のコミット識別（`user.name` / `user.email`）が設定済みであること
+     （`git var GIT_COMMITTER_IDENT` で確認）。未設定ならループも各ターンも
+     state をコミットできず無進捗で止まるので、この時点で設定してもらう
    - `jq` と `gsd-lite-loop.sh`（PATH 上）が使えること。なければ導入方法を案内して中断
 2. **既存チェック**: `.gsd-lite/state.json` が既にあればセットアップ済み。その場合は
    AskUserQuestion で「**スキル・allowlist を最新テンプレートに更新するか**」を確認する:
@@ -52,6 +55,11 @@ Claude の AskUserQuestion や allowlist を Codex に要求しない。
    **Codex ではこの手順をスキップ**。ループは workspace-write sandbox と
    approval_policy=never で動き、コミット用に Git 管理ディレクトリを追加する。
    ネットワークや追加パスなど必要な権限は起動前に環境側で用意する。
+   sandbox は bubblewrap の unprivileged user namespace に依存する。使えない環境
+   （`codex sandbox -- true` が失敗する）では `--check` が止めるので、
+   `GSD_LITE_CODEX_SANDBOX=danger-full-access`（隔離環境向け）かカーネル設定で対処する。
+   無人ターンは MCP の承認プロンプトに応答できないため、Codex 側で承認必須の
+   MCP ツールは使えない点にも注意する。
 5. **.gitignore**: `.gsd-lite/logs/` と `.gsd-lite/loop.pid` を追記（なければ作成）
 6. **コミット**: 現在のブランチ（= 以後の base ブランチ）に
    `gsd-lite: scaffold` としてコミット

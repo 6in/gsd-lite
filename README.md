@@ -82,7 +82,8 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 | `GSD_LITE_ENGINE` | 全フェーズを `claude` / `codex` に上書き（phase_engines より優先） |
 | `GSD_LITE_CODEX_BIN` | Codex 実行ファイル（既定: `codex`） |
 | `GSD_LITE_CODEX_MODEL` | Codex の全フェーズ共通モデル（state より優先） |
-| `GSD_LITE_CODEX_SANDBOX` | 既定: `workspace-write` |
+| `GSD_LITE_CODEX_SANDBOX` | 既定: `workspace-write`。bubblewrap が使えない環境では `danger-full-access`（sandbox なし。隔離環境向け） |
+| `GSD_LITE_CODEX_SANDBOX_PROBE` | 既定: `auto`。Codex を使うフェーズがあれば起動前に `codex sandbox -- true` で sandbox の実効性を検証する。`skip` で省略 |
 | `GSD_LITE_TURN_TIMEOUT` | 1 ターンの制限秒数（既定: 3600、両エンジン共通） |
 
 Codex は `approval_policy=never` で実行し、コミットのために Git 管理ディレクトリを
@@ -140,6 +141,17 @@ gsd-lite-loop.sh --status   # フェーズ別の実行先と進捗を表示
 
 通常のループ起動でも実行前チェックを行う。後半で使うCLIやスキルが不足していれば
 最初のターンより前に終了コード6で停止する。認証・通信の疎通確認は含まない。
+
+チェックには次も含まれる（どちらも見落とすと「全ターン無進捗 → auto-BLOCKED」になる）。
+
+- **git 識別**: `git var GIT_COMMITTER_IDENT` が通ること。ループ自身も各ターンも
+  state.json をコミットするため、`user.name` / `user.email` 未設定では進捗を残せない
+- **Codex sandbox の実効性**: Codex を使うフェーズがあり sandbox が `danger-full-access`
+  以外なら `codex sandbox -c sandbox_mode=... -- true` を実行する。bubblewrap が
+  unprivileged user namespace を作れない環境（Ubuntu 24.04 の
+  `kernel.apparmor_restrict_unprivileged_userns=1` など）では Codex のシェル実行も
+  `apply_patch` も全て失敗するため、ここで止めて対処（`GSD_LITE_CODEX_SANDBOX=danger-full-access`、
+  カーネル設定の変更、または impl / verify を Claude に切り替え）を案内する
 ループ自体は対話せず、保存された組み合わせで毎ターン実行先を切り替える。
 既存プロジェクトは再インストール後、init でスキルを更新すると選択手順が反映される。
 

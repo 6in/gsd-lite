@@ -7,6 +7,8 @@ LOOP=$(cd "$(dirname "$0")/.." && pwd)/bin/gsd-lite-loop.sh
 REPO_DIR=$(dirname "$(dirname "$LOOP")")
 # 呼び出し元のエンジン設定をテストに持ち込まない。
 unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT
+# スタブは `codex sandbox` を実装しないので、sandbox probe は専用テスト以外で飛ばす。
+export GSD_LITE_CODEX_SANDBOX_PROBE=skip
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 ng(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -446,6 +448,69 @@ EOF
   GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/pause-terminal" "$LOOP" > "$TESTROOT/pause.log" 2>&1
   assert_eq "$terminal wins over pause" "$?" "$expected_exit"
 done
+
+echo "== Test 21: Codex sandbox の実効性 probe =="
+# bubblewrap が使えない環境の Codex を模す（sandbox --help は通るが実行は失敗）
+cat > "$TESTROOT/bin/codex-sandbox-broken" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> .gsd-lite/stub-args.log
+if [ "$1" = sandbox ]; then
+  [ "$2" = --help ] && exit 0
+  echo "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" >&2; exit 1
+fi
+exec "$(dirname "$0")/codex-happy" "$@"
+EOF
+cat > "$TESTROOT/bin/codex-sandbox-ok" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> .gsd-lite/stub-args.log
+[ "$1" = sandbox ] && exit 0
+exec "$(dirname "$0")/codex-happy" "$@"
+EOF
+cat > "$TESTROOT/bin/codex-no-sandbox-cmd" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> .gsd-lite/stub-args.log
+[ "$1" = sandbox ] && { echo "error: unrecognized subcommand 'sandbox'" >&2; exit 2; }
+exec "$(dirname "$0")/codex-happy" "$@"
+EOF
+chmod +x "$TESTROOT/bin/"codex-*
+make_codex_project "$TESTROOT/c21"
+GSD_LITE_CODEX_SANDBOX_PROBE=auto GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-sandbox-broken" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "broken sandbox rejected by --check" "$?" "6"
+grep -q 'danger-full-access' "$TESTROOT/check.log" && ok "remedy is suggested" || ng "remedy missing"
+GSD_LITE_CODEX_SANDBOX_PROBE=auto GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-sandbox-broken" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "broken sandbox rejected before the first turn" "$?" "6"
+assert_eq "no turn ran on broken sandbox" "$(jq -r .turn .gsd-lite/state.json)" "0"
+[ ! -f .gsd-lite/loop.pid ] && ok "probe failure cleans pidfile" || ng "stale pidfile after probe"
+: > .gsd-lite/stub-args.log
+GSD_LITE_CODEX_SANDBOX_PROBE=auto GSD_LITE_CODEX_SANDBOX=danger-full-access GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-sandbox-broken" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "danger-full-access skips the probe" "$?" "0"
+grep -qx sandbox .gsd-lite/stub-args.log && ng "probe ran under danger-full-access" || ok "probe not run under danger-full-access"
+GSD_LITE_CODEX_SANDBOX_PROBE=skip GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-sandbox-broken" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "PROBE=skip bypasses the probe" "$?" "0"
+: > .gsd-lite/stub-args.log
+GSD_LITE_CODEX_SANDBOX_PROBE=auto GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-sandbox-ok" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "working sandbox passes --check" "$?" "0"
+grep -Fxq 'sandbox_mode="workspace-write"' .gsd-lite/stub-args.log && ok "probe uses the configured sandbox" || ng "probe sandbox arg"
+GSD_LITE_CODEX_SANDBOX_PROBE=auto GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-no-sandbox-cmd" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "old codex without sandbox subcommand still passes" "$?" "0"
+grep -q 'WARN' "$TESTROOT/check.log" && ok "old codex warns" || ng "no WARN for old codex"
+make_project "$TESTROOT/c21claude"
+GSD_LITE_CODEX_SANDBOX_PROBE=auto GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-sandbox-broken" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "claude-only project never probes Codex" "$?" "0"
+
+echo "== Test 22: git 識別の事前検証 =="
+make_project "$TESTROOT/p22"
+git config --unset user.email; git config --unset user.name; git config user.useConfigOnly true
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "missing identity rejected by --check" "$?" "6"
+grep -q 'identity' "$TESTROOT/check.log" && ok "identity message" || ng "identity message missing"
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "missing identity stops before the first turn" "$?" "6"
+assert_eq "no turn ran without identity" "$(jq -r .turn .gsd-lite/state.json)" "0"
+[ ! -f .gsd-lite/loop.pid ] && ok "identity failure cleans pidfile" || ng "stale pidfile after identity failure"
+git config user.email t@t; git config user.name t
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "identity restored passes --check" "$?" "0"
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -14,6 +14,10 @@
 #   GSD_LITE_CODEX_BIN         codex バイナリの上書き
 #   GSD_LITE_CODEX_MODEL       Codex の全フェーズ共通モデル（state.codex.model より優先）
 #   GSD_LITE_CODEX_SANDBOX     Codex sandbox（デフォルト workspace-write）
+#   GSD_LITE_CODEX_SANDBOX_PROBE auto / skip（デフォルト auto）。Codex を使うフェーズがあり
+#                              sandbox が danger-full-access 以外なら、起動前に
+#                              `codex sandbox -- true` で sandbox が実際に動くか検証する
+#                              （bubblewrap が user namespace を作れない環境の早期検出）
 #   GSD_LITE_CLAUDE_BIN        claude バイナリの上書き（テスト用スタブ差し込み）
 #   GSD_LITE_PERMISSION_MODE   claude -p の --permission-mode（デフォルト acceptEdits）
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
@@ -112,6 +116,43 @@ check_config() {
     [ -f "$skill_dir/gsd-lite-$check_phase/SKILL.md" ] ||
       die "missing $skill_dir/gsd-lite-$check_phase/SKILL.md (update project skills before starting)"
   done
+  check_git_identity
+  check_codex_sandbox
+}
+
+check_git_identity() {
+  # ループ自身（auto-BLOCKED）も各ターンのエージェントも state.json をコミットする。
+  # 識別が無いと「state は書いたがコミットできない」ターンが続き、無進捗扱いで止まる
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository"
+  git var GIT_COMMITTER_IDENT >/dev/null 2>&1 ||
+    die "git identity is not configured — set user.name / user.email (git config user.email you@example.com) before starting; the loop and every turn commit $STATE"
+}
+
+check_codex_sandbox() {
+  # sandbox の値が妥当でも、bubblewrap が user namespace を作れない環境では
+  # Codex のシェル実行も apply_patch も全て失敗する（--check が通ったのに全ターン無進捗になる）。
+  # danger-full-access は sandbox を使わないので検証不要
+  local probe_phase uses_codex=0 codex_bin
+  [ "${GSD_LITE_CODEX_SANDBOX_PROBE:-auto}" = skip ] && return 0
+  [ "$CODEX_SANDBOX" = danger-full-access ] && return 0
+  for probe_phase in research plan impl verify; do
+    [ "$(engine_for "$probe_phase")" = codex ] && uses_codex=1
+  done
+  [ "$uses_codex" -eq 1 ] || return 0
+  codex_bin="${GSD_LITE_CODEX_BIN:-codex}"
+  if ! "$codex_bin" sandbox --help </dev/null >/dev/null 2>&1; then
+    echo "gsd-lite: WARN $codex_bin has no 'sandbox' subcommand — skipping the sandbox probe（sandbox が動かない環境では最初の Codex ターンが無進捗で止まる）" >&2
+    return 0
+  fi
+  local timeout_cmd=()
+  command -v timeout >/dev/null && timeout_cmd=(timeout -k 5 60)
+  if ! "${timeout_cmd[@]}" "$codex_bin" sandbox -c "sandbox_mode=\"$CODEX_SANDBOX\"" -- true </dev/null >/dev/null 2>&1; then
+    die "Codex sandbox '$CODEX_SANDBOX' cannot run commands on this machine (bubblewrap / unprivileged user namespace が使えない環境の可能性。Ubuntu 24.04 では kernel.apparmor_restrict_unprivileged_userns=1 が典型).
+  対処: (a) GSD_LITE_CODEX_SANDBOX=danger-full-access で起動（sandbox なし。無人ターンが FS 全体に書けるので隔離環境向け）
+        (b) unprivileged user namespace を許可する（例: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0）
+        (c) impl / verify を Claude に切り替える（state の phase_engines）
+  この検証を飛ばすには GSD_LITE_CODEX_SANDBOX_PROBE=skip"
+  fi
 }
 
 status() {
@@ -286,7 +327,8 @@ while true; do
         echo "更新せずに $retry 回連続で終了しました。最後のログ: $log"
       } > "$GSD_DIR/BLOCKED.md"
       git add "$STATE" "$GSD_DIR/BLOCKED.md" 2>/dev/null && \
-        git commit -qm "gsd-lite(loop): auto-BLOCKED (no progress after $retry attempts)" || true
+        git commit -qm "gsd-lite(loop): auto-BLOCKED (no progress after $retry attempts)" ||
+        echo "gsd-lite: WARN failed to commit the auto-BLOCKED state（git 識別や hook を確認。作業ツリーの $STATE は blocked のまま）" >&2
       finish 2
     fi
     set_retry "$retry"

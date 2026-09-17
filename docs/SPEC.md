@@ -489,6 +489,22 @@ done
 - research フェーズは無人ターンで Web 検索を行うため、allowlist テンプレートに
   WebSearch / WebFetch の許可を含める。`local_projects` 調査は
   `research.local_search_paths` 配下の読み取り許可が必要
+- **git 識別は必須**。ループ（auto-BLOCKED）も各ターンも state.json をコミットする
+  契約なので、`user.name` / `user.email` が無いと全ターンが無進捗扱いになる。
+  `--check` と通常起動は `git var GIT_COMMITTER_IDENT` で事前検証し、未設定なら
+  終了コード 6 で止める
+- **Codex sandbox は値の妥当性だけでなく実効性を検証する**。bubblewrap が
+  unprivileged user namespace を作れない環境では workspace-write sandbox 下の
+  シェル実行・apply_patch が全て失敗する（値は妥当なので `--check` を素通りし、
+  最初の Codex ターンが 3 回無進捗で auto-BLOCKED になる）。Codex を使うフェーズが
+  あり sandbox が `danger-full-access` 以外なら `codex sandbox -c sandbox_mode=... -- true`
+  を起動前に実行し、失敗時は対処（`GSD_LITE_CODEX_SANDBOX=danger-full-access` /
+  カーネル設定 / Claude への切り替え）を示して終了コード 6。
+  `GSD_LITE_CODEX_SANDBOX_PROBE=skip` で省略可、`codex sandbox` 非対応の旧版は WARN のみ
+- 無人ターンでは MCP ツールの承認プロンプトに応答できない。Codex 側で
+  `approval_mode = "approve"` を要求する MCP ツール（書き込み系）は
+  `approval_policy=never` により常に拒否されるので、無人実行に使う MCP は
+  承認不要に設定しておく（gsd-lite の範囲外だが典型的な無進捗要因）
 
 ## 9. ブロック・再開プロトコル
 

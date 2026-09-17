@@ -133,7 +133,11 @@ VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、
      選択と違う場合はその変数を外した起動コマンドを使う（黙って無視しない）。
    - 決定を DECISIONS.md に記録し、state の `engine` / `phase_engines` を更新。
      同じ環境で `gsd-lite-loop.sh --check` を実行し、不足があれば起動せず解消する。
-     このチェックは CLI / スキル配置の検証で、認証や外部サービス疎通の保証ではない。
+     このチェックは CLI / スキル配置 / git 識別 / Codex sandbox の実効性の検証で、
+     認証や外部サービス疎通の保証ではない。Codex sandbox の検証で止まった場合は
+     表示された対処（`GSD_LITE_CODEX_SANDBOX=danger-full-access` で起動、カーネル設定、
+     impl / verify を Claude に切り替え）のどれにするかを AUQ で選んでもらい、
+     環境変数で起動する場合は DECISIONS.md に記録して起動コマンドにも付ける。
 
 5. **マイルストーンブランチ作成**（base の整理は手順 0-a で済んでいる前提）:
    - discuss で作成した要件・設定・スキル以外の未コミット変更を確認し、
