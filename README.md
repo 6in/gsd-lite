@@ -92,6 +92,33 @@ Claude の allowlist は使わない。親環境や組織ポリシーによる�
 ネットワークアクセスが必要な調査・依存取得・push は、起動前に Codex の設定で
 必要な権限を用意する。許可不足の場合はログと BLOCKED.md を確認する。
 
+### Linux で Codex sandbox を使う前提（bubblewrap と user namespace）
+
+Codex の Linux sandbox は bubblewrap（bwrap）で作られ、**一般ユーザーが user namespace を
+作れること**を前提にする。Ubuntu 24.04 以降は AppArmor の既定
+（`kernel.apparmor_restrict_unprivileged_userns=1`）でこれが禁止されているため、
+そのままでは workspace-write sandbox 下のシェル実行と `apply_patch` が全て失敗し、
+Codex のターンは何も書けずに終わる（macOS は Seatbelt を使うので該当しない）。
+
+`gsd-lite-loop.sh --check` はこの状態を起動前に検出して終了コード 6 で止める。
+Codex のフェーズを本来の sandbox で動かすには、起動前に次の設定を行う。
+
+```bash
+# 確認（失敗するなら要設定）
+codex sandbox -- true && echo OK
+
+# その場で有効化（再起動で元に戻る）
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+# 永続化
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-userns.conf
+```
+
+この設定は一般ユーザーの user namespace 作成を許可するもので、bwrap 以外にも
+システム全体に効く。設定できない・したくない場合は、隔離された環境に限って
+`GSD_LITE_CODEX_SANDBOX=danger-full-access`（sandbox なし）で起動するか、
+Codex を使うフェーズを Claude に切り替える。
+
 既存の Claude プロジェクトでは、Codex から `$gsd-lite-init` でスキルを追加・更新し、
 ループ停止中に `engine` と `codex` 設定を追加してコミットする。
 進行中の phase・turn・成果物は保持する。
