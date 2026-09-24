@@ -1,6 +1,6 @@
 ---
 name: gsd-lite-impl
-description: gsd-lite の実装フェーズ（無人ループから Claude Code / Codex で起動）。PLAN.md の先頭の未完了タスクを 1 つだけ実装し、テストを通してコミットする。
+description: gsd-lite の実装フェーズ（無人ループから Claude Code / Codex / OpenCode で起動）。PLAN.md の先頭の未完了タスクを 1 つだけ実装し、テストを通してコミットする。
 disable-model-invocation: true
 ---
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# gsd-lite-loop.sh のドライランテスト（Claude / Codex をスタブ化、トークン消費なし）
+# gsd-lite-loop.sh のドライランテスト（Claude / Codex / OpenCode をスタブ化、トークン消費なし）
 set -u
 TESTROOT=$(mktemp -d /tmp/gsd-lite-test.XXXXXX)
 trap 'rm -rf "$TESTROOT"' EXIT
 LOOP=$(cd "$(dirname "$0")/.." && pwd)/bin/gsd-lite-loop.sh
 REPO_DIR=$(dirname "$(dirname "$LOOP")")
 # 呼び出し元のエンジン設定をテストに持ち込まない。
-unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT
+unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL
 # スタブは `codex sandbox` を実装しないので、sandbox probe は専用テスト以外で飛ばす。
 export GSD_LITE_CODEX_SANDBOX_PROBE=skip
 PASS=0; FAIL=0
@@ -511,6 +511,103 @@ assert_eq "no turn ran without identity" "$(jq -r .turn .gsd-lite/state.json)" "
 git config user.email t@t; git config user.name t
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "$LOOP" --check > "$TESTROOT/check.log" 2>&1
 assert_eq "identity restored passes --check" "$?" "0"
+
+# OpenCode の argv を行単位で記録し、同じ状態遷移スタブに委譲する。
+cat > "$TESTROOT/bin/opencode-happy" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> .gsd-lite/stub-args.log
+[ "$1" = run ] || exit 91
+prompt="${!#}"
+case "$prompt" in
+  'Load the skill named gsd-lite-research '*) cmd=/gsd-lite-research ;;
+  'Load the skill named gsd-lite-plan '*) cmd=/gsd-lite-plan ;;
+  'Load the skill named gsd-lite-impl '*) cmd=/gsd-lite-impl ;;
+  'Load the skill named gsd-lite-verify '*) cmd=/gsd-lite-verify ;;
+  *) exit 92 ;;
+esac
+[ -f ".opencode/skills/${cmd#/}/SKILL.md" ] || exit 93
+# stdin が親の入力を読み込まないことも検証する。
+if read -r unexpected; then exit 94; fi
+exec "$(dirname "$0")/claude-happy" -p "$cmd"
+EOF
+chmod +x "$TESTROOT/bin/opencode-happy"
+
+make_opencode_project(){
+  make_project "$1"
+  mkdir -p .opencode/skills
+  cp -r "$REPO_DIR/templates/skills/." .opencode/skills/
+  t=$(mktemp)
+  jq '.engine="opencode" | .opencode.model={research:"oc/research-stub",plan:"oc/plan-stub",impl:"oc/impl-stub",verify:"oc/verify-stub"} | .opencode.variant={plan:"high"} | .opencode.agent={impl:"build"}' .gsd-lite/state.json > "$t"
+  mv "$t" .gsd-lite/state.json
+  git add -A && git commit -qm "configure opencode"
+}
+
+echo "== Test 23: OpenCode フルサイクルとモデル設定 =="
+make_opencode_project "$TESTROOT/opencode project"
+GSD_LITE_OPENCODE_BIN="$TESTROOT/bin/opencode-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "OpenCode DONE" "$?" "0"
+assert_eq "OpenCode turns" "$(jq -r .turn .gsd-lite/state.json)" "5"
+for value in run --dangerously-skip-permissions oc/research-stub oc/plan-stub oc/impl-stub oc/verify-stub --variant high --agent build; do
+  grep -Fxq -- "$value" .gsd-lite/stub-args.log && ok "OpenCode argv: $value" || ng "OpenCode argv: $value"
+done
+assert_eq "variant only on plan" "$(grep -cx -- '--variant' .gsd-lite/stub-args.log)" "1"
+assert_eq "agent on both impl turns" "$(grep -cx -- '--agent' .gsd-lite/stub-args.log)" "2"
+grep -Eq 'sonnet-stub|opus-stub|permission-mode|approval_policy|sandbox' .gsd-lite/stub-args.log && ng "Claude / Codex flags leaked" || ok "no Claude / Codex flags in OpenCode"
+assert_eq "OpenCode clean worktree" "$(git status --porcelain | wc -l)" "0"
+out=$("$LOOP" --status)
+echo "$out" | grep -q 'engine    : opencode' && ok "status shows engine" || ng "status engine"
+echo "$out" | grep -q 'impl -> opencode (model: oc/impl-stub)' && ok "status shows model" || ng "status model"
+
+echo "== Test 24: OpenCode override・既定モデル・エラー =="
+make_opencode_project "$TESTROOT/oc24"
+commit_state 'del(.engine, .opencode) | .max_turns=1'
+GSD_LITE_ENGINE=opencode GSD_LITE_OPENCODE_BIN="$TESTROOT/bin/opencode-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "engine override ran one turn" "$?" "3"
+grep -Fxq -- '--model' .gsd-lite/stub-args.log && ng "default model should be omitted" || ok "CLI default model"
+commit_state '.max_turns=2'
+GSD_LITE_ENGINE=opencode GSD_LITE_OPENCODE_MODEL="prov/custom model" GSD_LITE_OPENCODE_BIN="$TESTROOT/bin/opencode-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "model override ran" "$?" "3"
+grep -Fxq 'prov/custom model' .gsd-lite/stub-args.log && ok "model is one argument" || ng "model quoting"
+out=$(GSD_LITE_ENGINE=opencode GSD_LITE_OPENCODE_MODEL="prov/custom model" "$LOOP" --status)
+echo "$out" | grep -q 'research -> opencode (model: prov/custom model)' && ok "status shows env model" || ng "status env model"
+make_opencode_project "$TESTROOT/oc24b"
+GSD_LITE_OPENCODE_BIN="$TESTROOT/missing" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "missing OpenCode rejected" "$?" "6"
+rm .opencode/skills/gsd-lite-plan/SKILL.md
+GSD_LITE_OPENCODE_BIN="$TESTROOT/bin/opencode-happy" "$LOOP" --check > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "missing OpenCode skill rejected" "$?" "6"
+grep -q '.opencode/skills/gsd-lite-plan/SKILL.md' "$TESTROOT/loop-out.log" && ok "missing skill names OpenCode path" || ng "missing skill message"
+GSD_LITE_OPENCODE_BIN="$TESTROOT/bin/opencode-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "missing skill stops before turns" "$?" "6"
+[ ! -e .gsd-lite/stub-args.log ] && ok "no OpenCode turn without skill" || ng "turn ran without skill"
+
+echo "== Test 25: 3 エンジン混在ルーティングとインストール =="
+make_opencode_project "$TESTROOT/mixed3"
+mkdir -p .agents/skills && cp -r "$REPO_DIR/templates/skills/." .agents/skills/
+git add -A && git commit -qm "codex skills"
+commit_state '.engine="claude" | .phase_engines={impl:"opencode",verify:"codex"}'
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" GSD_LITE_OPENCODE_BIN="$TESTROOT/bin/opencode-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "three-engine cycle DONE" "$?" "0"
+assert_eq "OpenCode impl turns" "$(grep -cx run .gsd-lite/stub-args.log)" "2"
+assert_eq "Codex verify turn" "$(grep -cx exec .gsd-lite/stub-args.log)" "1"
+for route in '[claude/research]' '[claude/plan]' '[opencode/impl]' '[codex/verify]'; do
+  grep -Fq "$route" "$TESTROOT/loop-out.log" && ok "routes $route" || ng "routes $route"
+done
+commit_state '.phase_engines={impl:"opencodex"}'
+"$LOOP" --check > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "unknown phase engine rejected" "$?" "6"
+install_root="$TESTROOT/oc install"
+GSD_LITE_INSTALL_ROOT="$install_root" "$REPO_DIR/install.sh" --engine opencode > "$TESTROOT/install.log" 2>&1
+assert_eq "OpenCode install succeeded" "$?" "0"
+[ -f "$install_root/.config/opencode/skills/gsd-lite-init/SKILL.md" ] && ok "OpenCode init installed" || ng "OpenCode init missing"
+[ -f "$install_root/.config/opencode/commands/gsd-lite-init.md" ] && [ -f "$install_root/.config/opencode/commands/gsd-lite-discuss.md" ] && ok "OpenCode commands installed" || ng "OpenCode commands missing"
+[ ! -e "$install_root/.claude" ] && [ ! -e "$install_root/.codex" ] && ok "OpenCode-only install" || ng "other engine directories created"
+[ ! -e "$install_root/.config/opencode/gsd-lite/templates/settings.allowlist.json" ] && ok "no Claude allowlist in OpenCode" || ng "Claude allowlist copied"
+assert_eq "OpenCode template engine" "$(jq -r .engine "$install_root/.config/opencode/gsd-lite/templates/state.json")" "opencode"
+assert_eq "OpenCode template keeps opencode config" "$(jq -c .opencode "$install_root/.config/opencode/gsd-lite/templates/state.json")" '{"model":{},"variant":{},"agent":{}}'
+GSD_LITE_INSTALL_ROOT="$install_root" "$REPO_DIR/install.sh" --engine all > "$TESTROOT/install.log" 2>&1
+assert_eq "all engines install" "$?" "0"
+[ -f "$install_root/.agents/skills/gsd-lite-init/SKILL.md" ] && [ -f "$install_root/.claude/skills/gsd-lite-init/SKILL.md" ] && ok "all installs three engines" || ng "all missed an engine"
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

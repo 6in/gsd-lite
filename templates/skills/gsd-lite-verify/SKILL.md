@@ -1,6 +1,6 @@
 ---
 name: gsd-lite-verify
-description: gsd-lite の検証フェーズ（無人ループから Claude Code / Codex で起動）。マイルストーンの diff 全体をレビュー + セキュリティチェックし、合格ならベースブランチへ自動マージする。
+description: gsd-lite の検証フェーズ（無人ループから Claude Code / Codex / OpenCode で起動）。マイルストーンの diff 全体をレビュー + セキュリティチェックし、合格ならベースブランチへ自動マージする。
 disable-model-invocation: true
 ---
 
@@ -43,7 +43,7 @@ disable-model-invocation: true
         -o merge_request.target=<branch.base> -o merge_request.title="<要約>"`
        — push 出力に MR の URL が表示されるのでそれを記録する
    - MR/PR の本文には受け入れ基準の達成状況と VERIFICATION.md の要約を書き、
-     末尾に実際の実行エンジン名（Claude Code または Codex）を記載する
+     末尾に実際の実行エンジン名（Claude Code / Codex / OpenCode）を記載する
    - 作成成功: MR/PR の URL を VERIFICATION.md と PROGRESS.md に記録。
      ブランチはそのまま。`phase: "done"` / `next_command: "DONE"`（マージは人間 / CI）
    - **push の成否を必ず確認する**（MR 用 push・最終 state コミット後の再 push とも）。

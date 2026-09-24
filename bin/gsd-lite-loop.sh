@@ -10,7 +10,7 @@
 #   gsd-lite-loop.sh --stop     # 現在のターン終了後に中断を依頼
 #
 # 環境変数:
-#   GSD_LITE_ENGINE            claude / codex（未指定時 state.engine、旧 state は claude）
+#   GSD_LITE_ENGINE            claude / codex / opencode（未指定時 state.engine、旧 state は claude）
 #   GSD_LITE_CODEX_BIN         codex バイナリの上書き
 #   GSD_LITE_CODEX_MODEL       Codex の全フェーズ共通モデル（state.codex.model より優先）
 #   GSD_LITE_CODEX_SANDBOX     Codex sandbox（デフォルト workspace-write）
@@ -18,6 +18,8 @@
 #                              sandbox が danger-full-access 以外なら、起動前に
 #                              `codex sandbox -- true` で sandbox が実際に動くか検証する
 #                              （bubblewrap が user namespace を作れない環境の早期検出）
+#   GSD_LITE_OPENCODE_BIN      opencode バイナリの上書き
+#   GSD_LITE_OPENCODE_MODEL    OpenCode の全フェーズ共通モデル（provider/model 形式。state.opencode.model より優先）
 #   GSD_LITE_CLAUDE_BIN        claude バイナリの上書き（テスト用スタブ差し込み）
 #   GSD_LITE_PERMISSION_MODE   claude -p の --permission-mode（デフォルト acceptEdits）
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
@@ -87,31 +89,46 @@ select_engine() {
   case "$ENGINE" in
     claude) AGENT_BIN="$CLAUDE_BIN" ;;
     codex) AGENT_BIN="${GSD_LITE_CODEX_BIN:-codex}" ;;
-    *) die "unknown engine: $ENGINE (expected claude or codex)" ;;
+    opencode) AGENT_BIN="${GSD_LITE_OPENCODE_BIN:-opencode}" ;;
+    *) die "unknown engine: $ENGINE (expected claude, codex or opencode)" ;;
+  esac
+}
+
+skill_dir_for() { # skill_dir_for <engine> — エンジンがプロジェクト内で探すスキル配置先
+  case "$1" in
+    codex) echo .agents/skills ;;
+    opencode) echo .opencode/skills ;;
+    *) echo .claude/skills ;;
+  esac
+}
+
+model_for() { # model_for <engine> <phase> — そのフェーズに渡すモデル（空なら CLI 既定）
+  case "$1" in
+    codex) printf '%s\n' "${GSD_LITE_CODEX_MODEL:-$(jq -r --arg phase "$2" '.codex.model[$phase] // empty' "$STATE")}" ;;
+    opencode) printf '%s\n' "${GSD_LITE_OPENCODE_MODEL:-$(jq -r --arg phase "$2" '.opencode.model[$phase] // empty' "$STATE")}" ;;
+    *) jq -r --arg phase "$2" '.model[$phase] // empty' "$STATE" ;;
   esac
 }
 
 check_config() {
   local check_phase skill_dir
   jq -e '
-    (.engine // "claude" | . == "claude" or . == "codex") and
+    (.engine // "claude" | . == "claude" or . == "codex" or . == "opencode") and
     ((.phase_engines // {}) | type == "object" and
       all(to_entries[];
         (.key == "research" or .key == "plan" or .key == "impl" or .key == "verify") and
-        (.value == "claude" or .value == "codex")))
+        (.value == "claude" or .value == "codex" or .value == "opencode")))
   ' "$STATE" >/dev/null || die "invalid engine / phase_engines configuration"
   CODEX_SANDBOX="${GSD_LITE_CODEX_SANDBOX:-workspace-write}"
   for check_phase in research plan impl verify; do
     select_engine "$check_phase"
     command -v "$AGENT_BIN" >/dev/null || die "$ENGINE binary not found: $AGENT_BIN (phase: $check_phase)"
+    skill_dir=$(skill_dir_for "$ENGINE")
     if [ "$ENGINE" = codex ]; then
-      skill_dir=.agents/skills
       case "$CODEX_SANDBOX" in
         read-only|workspace-write|danger-full-access) ;;
         *) die "invalid Codex sandbox: $CODEX_SANDBOX" ;;
       esac
-    else
-      skill_dir=.claude/skills
     fi
     [ -f "$skill_dir/gsd-lite-$check_phase/SKILL.md" ] ||
       die "missing $skill_dir/gsd-lite-$check_phase/SKILL.md (update project skills before starting)"
@@ -161,7 +178,9 @@ status() {
   echo "engine    : ${GSD_LITE_ENGINE:-$(sget '.engine // "claude"')}"
   jq -r '"milestone : \(.milestone)\nphase     : \(.phase)\nturn      : \(.turn)/\(.max_turns)\nnext      : \(.next_command)\nverify    : round \(.verify_round)/\(.verify_round_max)\nbranch    : \(.branch.name) (base: \(.branch.base))\nupdated   : \(.updated_at)"' "$STATE"
   for display_phase in research plan impl verify; do
-    echo "route     : $display_phase -> $(engine_for "$display_phase")"
+    display_engine=$(engine_for "$display_phase")
+    display_model=$(model_for "$display_engine" "$display_phase")
+    echo "route     : $display_phase -> $display_engine (model: ${display_model:-CLI default})"
   done
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
   if [ -f "$STOPFILE" ]; then
@@ -259,25 +278,23 @@ while true; do
   phase=$(sget '.phase')
   select_engine "$phase"
   retry=$(get_retry)
-  if [ "$ENGINE" = codex ]; then
-    model="${GSD_LITE_CODEX_MODEL:-$(jq -r --arg phase "$phase" '.codex.model[$phase] // empty' "$STATE")}"
-  else
-    model=$(jq -r --arg phase "$phase" '.model[$phase] // empty' "$STATE")
-  fi
+  model=$(model_for "$ENGINE" "$phase")
   milestone=$(sget '.milestone // empty')
   logdir="$GSD_DIR/logs/${milestone:-default}"   # マイルストーン別に分けて上書きを防ぐ
   mkdir -p "$logdir"
   log="$logdir/turn-$(printf '%03d' $((turn_before + 1)))-attempt$((retry + 1)).log"
 
   agent_args=()
-  if [ "$ENGINE" = codex ]; then
-    # state の /command 表現は共有。Codex には明示的なスキル参照を渡す。
+  if [ "$ENGINE" != claude ]; then
+    # state の /command 表現は共有。Codex / OpenCode には明示的なスキル参照を渡す。
     skill_name="${cmd#/}"
     case "$skill_name" in
-      ''|*[!a-zA-Z0-9_-]*) die "invalid Codex skill command: $cmd" ;;
+      ''|*[!a-zA-Z0-9_-]*) die "invalid $ENGINE skill command: $cmd" ;;
     esac
-    skill_file=".agents/skills/$skill_name/SKILL.md"
-    [ -f "$skill_file" ] || die "missing $skill_file (run \$gsd-lite-init in Codex first)"
+    skill_file="$(skill_dir_for "$ENGINE")/$skill_name/SKILL.md"
+    [ -f "$skill_file" ] || die "missing $skill_file (run gsd-lite-init with $ENGINE first)"
+  fi
+  if [ "$ENGINE" = codex ]; then
     agent_args=(exec --sandbox "$CODEX_SANDBOX" -c 'approval_policy="never"')
     # state の commit が進捗の契約。通常 repo と linked worktree の両方を扱う。
     agent_args+=(--add-dir "$(git rev-parse --absolute-git-dir)")
@@ -293,7 +310,18 @@ while true; do
     fi
     [ -z "$model" ] || agent_args+=(--model "$model")
     agent_args+=("\$$skill_name — Read $skill_file and execute exactly one unattended turn. Follow its state update and git commit procedure. If blocked, record the reason in .gsd-lite/BLOCKED.md and commit the blocked state.")
+  elif [ "$ENGINE" = opencode ]; then
+    # 無人ターンは承認プロンプトに応答できないので、明示的に deny されていない権限を自動承認する
+    # （opencode.json の deny ルールはそのまま効く）。スキルは skill ツール経由で読み込ませる。
+    agent_args=(run --dangerously-skip-permissions)
+    variant=$(jq -r --arg phase "$phase" '.opencode.variant[$phase] // empty' "$STATE")
+    agent=$(jq -r --arg phase "$phase" '.opencode.agent[$phase] // empty' "$STATE")
+    [ -z "$model" ] || agent_args+=(--model "$model")
+    [ -z "$variant" ] || agent_args+=(--variant "$variant")
+    [ -z "$agent" ] || agent_args+=(--agent "$agent")
+    agent_args+=("Load the skill named $skill_name with the skill tool (its file is $skill_file) and execute exactly one unattended turn. Follow its state update and git commit procedure. If blocked, record the reason in .gsd-lite/BLOCKED.md and commit the blocked state.")
   else
+
     agent_args=(-p "$cmd" --permission-mode "$PERMISSION_MODE")
     [ -z "$model" ] || agent_args+=(--model "$model")
   fi

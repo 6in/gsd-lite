@@ -4,7 +4,7 @@ gsd-core のライト版。**対話で仕様を詰め切ったら、あとは無
 research → plan → impl → verify → 仕上げ（ローカルのみなら自動マージ /
 リモートありなら push + MR/PR 作成）まで進める**最小構成の自律開発ランナー。
 
-- 毎ターン Claude Code (`claude -p`) または Codex (`codex exec`) で新規コンテキスト起動。継続性は `.gsd-lite/` + git のみ
+- 毎ターン Claude Code (`claude -p`)、Codex (`codex exec`)、OpenCode (`opencode run`) のいずれかで新規コンテキスト起動。継続性は `.gsd-lite/` + git のみ
 - ループ（`gsd-lite-loop.sh`）はダム: `state.json` の `next_command` を実行するだけ
 - 1 ターン = 1 タスク。判断に迷ったら推測せず BLOCKED で人間に戻す
 
@@ -79,7 +79,7 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 
 | 環境変数 | 用途 |
 |---|---|
-| `GSD_LITE_ENGINE` | 全フェーズを `claude` / `codex` に上書き（phase_engines より優先） |
+| `GSD_LITE_ENGINE` | 全フェーズを `claude` / `codex` / `opencode` に上書き（phase_engines より優先） |
 | `GSD_LITE_CODEX_BIN` | Codex 実行ファイル（既定: `codex`） |
 | `GSD_LITE_CODEX_MODEL` | Codex の全フェーズ共通モデル（state より優先） |
 | `GSD_LITE_CODEX_SANDBOX` | 既定: `workspace-write`。bubblewrap が使えない環境では `danger-full-access`（sandbox なし。隔離環境向け） |
@@ -126,10 +126,111 @@ Codex を使うフェーズを Claude に切り替える。
 仕様の参照: [OpenAI公式・非対話実行](https://learn.chatgpt.com/docs/non-interactive-mode)、
 [スキル](https://learn.chatgpt.com/docs/build-skills)。
 
+## OpenCode で使う
+
+前提: 認証済みの [OpenCode](https://opencode.ai) CLI（`opencode`）、git、jq、timeout（coreutils）、flock（util-linux）。
+
+```bash
+./install.sh --engine opencode   # OpenCode 用のみ。Claude / Codex も含めるなら --engine all
+```
+
+対象プロジェクトで OpenCode を開き、次を入力する（新しいコマンドが見えなければ再起動）。
+
+```text
+/gsd-lite-init
+/gsd-lite-discuss 追加したい機能
+```
+
+OpenCode はスキルをスラッシュコマンドで直接呼べない（モデルが `skill` ツールで読み込む）ため、
+install.sh は `~/.config/opencode/commands/gsd-lite-{init,discuss}.md` にスキルを読み込む薄い
+コマンドを置く。init スキル本体は `~/.config/opencode/skills/`、雛形は
+`~/.config/opencode/gsd-lite/templates/`、プロジェクト用スキルは `.opencode/skills/` に配置する。
+
+`.gsd-lite/state.json` の `engine` が `opencode` なら、通常の `gsd-lite-loop.sh` で
+`opencode run` が起動する。`next_command` は `/gsd-lite-research` 等のままでよく、
+ループが「スキル `gsd-lite-research` を読み込んで 1 ターン実行せよ」というメッセージに変換する。
+
+フェーズ別のモデル・推論強度・エージェントは state に設定してコミットする。例:
+
+```json
+{
+  "engine": "opencode",
+  "opencode": {
+    "model": { "research": "anthropic/claude-sonnet-5", "impl": "anthropic/claude-opus-5" },
+    "variant": { "plan": "high", "verify": "high" },
+    "agent": { "impl": "build" }
+  }
+}
+```
+
+モデルは OpenCode の `provider/model` 形式（`opencode models` で一覧）。
+`variant` は `opencode run --variant`（プロバイダ固有の推論強度。high / max / minimal など）、
+`agent` は `opencode run --agent` に渡す。未指定のフェーズは OpenCode の設定を使う。
+既存の `model` は Claude 専用、`codex` は Codex 専用で、OpenCode には渡さない。
+
+| 環境変数 | 用途 |
+|---|---|
+| `GSD_LITE_OPENCODE_BIN` | OpenCode 実行ファイル（既定: `opencode`） |
+| `GSD_LITE_OPENCODE_MODEL` | OpenCode の全フェーズ共通モデル（state より優先。`provider/model` 形式） |
+
+無人ターンは承認プロンプトに応答できないため、ループは `opencode run --dangerously-skip-permissions`
+で起動し、明示的に `deny` されていない権限を自動承認する。`opencode.json` の `permission` で
+`deny` にした操作はそのまま拒否されるので、無人実行で使う bash / edit / webfetch 等は
+`deny` にしない。Claude の allowlist や Codex の sandbox 設定は使わない。
+
+既存の Claude / Codex プロジェクトでは、OpenCode から `/gsd-lite-init` でスキルを追加・更新し、
+ループ停止中に `engine` と `opencode` 設定を追加してコミットする。
+進行中の phase・turn・成果物は保持する。
+
+## フェーズ別モデルの変更（init 後）
+
+各フェーズで使うモデルは `.gsd-lite/state.json` に保存され、`/gsd-lite-init` が
+テンプレートの既定値を書き込む。**init 後にいつでも state.json を直接編集して変えられる**。
+手順は 3 つ。
+
+1. ループを止める（実行中なら `gsd-lite-loop.sh --stop` で現在のターンの完了を待つ）
+2. `.gsd-lite/state.json` の該当キーを編集する（フェーズは `research` / `plan` / `impl` / `verify`）
+3. **コミットする**。ループはコミット済みの state しか信頼せず、未コミットの編集は
+   ターン失敗時に巻き戻る
+
+```bash
+gsd-lite-loop.sh --stop
+$EDITOR .gsd-lite/state.json
+git add .gsd-lite/state.json && git commit -m "gsd-lite: モデル変更"
+gsd-lite-loop.sh --status     # route 行で各フェーズのエンジンとモデルを確認
+```
+
+エンジンごとにキーが分かれており、そのフェーズを実行するエンジンのキーだけが使われる。
+
+| エンジン | モデル | 推論強度など | 値の形式 |
+|---|---|---|---|
+| Claude Code | `model.<phase>` | （なし） | `claude -p --model` に渡す名前。例 `claude-opus-5`、`claude-fable-5-1` |
+| Codex | `codex.model.<phase>` | `codex.reasoning_effort.<phase>`（`low` / `medium` / `high` / `xhigh` など） | `codex exec --model` に渡す名前。例 `gpt-5.5` |
+| OpenCode | `opencode.model.<phase>` | `opencode.variant.<phase>`、`opencode.agent.<phase>` | `provider/model`。例 `anthropic/claude-opus-5`（`opencode models` で一覧） |
+
+3 エンジンぶんを書いた例（実際に使われるのは `engine` / `phase_engines` で選ばれたエンジンの分だけ）:
+
+```json
+{
+  "engine": "claude",
+  "phase_engines": { "impl": "opencode", "verify": "codex" },
+  "model":    { "research": "claude-fable-5-1", "plan": "claude-fable-5-1", "impl": "claude-opus-5", "verify": "claude-fable-5-1" },
+  "codex":    { "model": { "verify": "gpt-5.5" }, "reasoning_effort": { "verify": "high" } },
+  "opencode": { "model": { "impl": "anthropic/claude-opus-5" }, "variant": {}, "agent": {} }
+}
+```
+
+キーを削除するか空文字にすると、そのフェーズはその CLI の既定モデルで動く。
+`GSD_LITE_CODEX_MODEL` / `GSD_LITE_OPENCODE_MODEL` を設定して起動すると、
+そのエンジンの全フェーズが state より優先してそのモデルになる（一時的な切り替え用）。
+テンプレートの既定値（新規プロジェクトに配られる値）を変えたい場合は
+`templates/state.json` を編集して `./install.sh` を再実行する。既存プロジェクトの
+state.json には反映されないので、上の手順で個別に変更する。
+
 ## ループ開始前に実行パターンを選ぶ
 
 discuss の最後に、実行パターンを選んでからループを開始する。
-対話するホストは自由で、Claude Code で仕様を詰めて Codex に実装させることもできる。
+対話するホストは自由で、Claude Code で仕様を詰めて Codex や OpenCode に実装させることもできる。
 
 | パターン | 調査 | 計画 | 実装 | レビュー |
 |---|---|---|---|---|
@@ -138,8 +239,10 @@ discuss の最後に、実行パターンを選んでからループを開始す
 | 実装だけ Codex | Claude | Claude | Codex | Claude |
 | レビューだけ Codex | Claude | Claude | Claude | Codex |
 | 実装・レビューは Codex | Claude | Claude | Codex | Codex |
+| すべて OpenCode | OpenCode | OpenCode | OpenCode | OpenCode |
+| 実装だけ OpenCode | Claude | Claude | OpenCode | Claude |
 
-カスタム指定や、現在の設定を維持する選択も可能。
+カスタム指定（フェーズごとに `claude` / `codex` / `opencode` を選ぶ）や、現在の設定を維持する選択も可能。
 選択結果は `state.json` に保存して要件と一緒にコミットする。
 モデルはそのフェーズを実行するエンジンの設定を使う。
 
@@ -156,14 +259,14 @@ discuss の最後に、実行パターンを選んでからループを開始す
 プリセット変更時は `phase_engines` を置き換えるため、前回の割り当ては残らない。
 指定できるフェーズは `research` / `plan` / `impl` / `verify`。
 
-混在させる場合は `install.sh --engine all` で両方のテンプレートを導入する。
+混在させる場合は `install.sh --engine all` で全エンジンのテンプレートを導入する。
 discuss が選択したエンジン用のプロジェクトスキルを配置する
-（Claude: `.claude/skills/`、Codex: `.agents/skills/`）。
+（Claude: `.claude/skills/`、Codex: `.agents/skills/`、OpenCode: `.opencode/skills/`）。
 CLI の認証と権限も起動前に準備しておく。
 
 ```bash
 gsd-lite-loop.sh --check    # 全フェーズのCLI・スキル配置を確認（変更・起動なし）
-gsd-lite-loop.sh --status   # フェーズ別の実行先と進捗を表示
+gsd-lite-loop.sh --status   # フェーズ別の実行先・モデルと進捗を表示
 ```
 
 通常のループ起動でも実行前チェックを行う。後半で使うCLIやスキルが不足していれば
@@ -218,7 +321,7 @@ DONE・BLOCKED（リトライ上限到達を含む）は中断より優先する
 bash tests/run-tests.sh
 ```
 
-Claude / Codex をスタブ化し、実モデルへの接続やトークン消費なしで検証する。
+Claude / Codex / OpenCode をスタブ化し、実モデルへの接続やトークン消費なしで検証する。
 
 ## リモート運用（MR/PR の作成手段）
 

@@ -3,6 +3,7 @@
   "engine": "claude",
   "phase_engines": {},
   "codex": { "model": {}, "reasoning_effort": {} },
+  "opencode": { "model": {}, "variant": {}, "agent": {} },
   "milestone": "",
   "phase": "discuss",
   "next_command": "DISCUSS",

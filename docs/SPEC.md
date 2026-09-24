@@ -2,15 +2,19 @@
 
 > Codex 対応追補: 本文の Claude Code 専用コマンド・配置例は従来エンジンの仕様。
 > 現行実装は `state.engine`（未指定: `claude`）または `GSD_LITE_ENGINE` で
-> `codex` も選択できる。Codex は `codex exec` と `.agents/skills/` を使い、
+> `codex` / `opencode` も選択できる。Codex は `codex exec` と `.agents/skills/` を使い、
 > `codex.model.<phase>` / `codex.reasoning_effort.<phase>` で設定する。
+> OpenCode は `opencode run --dangerously-skip-permissions` と `.opencode/skills/` を使い、
+> `opencode.model.<phase>`（`provider/model`）/ `opencode.variant.<phase>` / `opencode.agent.<phase>` で設定する。
+> フェーズ別モデルは init 後も `.gsd-lite/state.json` を編集・コミットして変更できる（README「フェーズ別モデルの変更」）。
 > discuss 終了時に実行パターンを選択し、`phase_engines.<phase>` でフェーズ別に
 > エンジンを上書きできる。`--check` は必要な全フェーズのCLI・スキルを事前検証する。
 > 中断・再開追補: `--stop` で `.gsd-lite/logs/.stop` を作成し、ターン境界で
 > 終了コード7で一時中断する。通常起動は排他取得後にフラグを削除して保存状態から再開する。
 > DONE / BLOCKED を優先し、未コミットstateの復元・リトライ回数の保持は従来と同じ。
 > 状態遷移・コミットによる進捗判定・終了コードは両エンジン共通。
-> 詳細なインストール・移行・権限設定は [README の Codex 手順](../README.md#codex-で使う) を参照。
+> 詳細なインストール・移行・権限設定は [README の Codex 手順](../README.md#codex-で使う) /
+> [OpenCode 手順](../README.md#opencode-で使う) を参照。
 
 
 - 作成日: 2026-09-09

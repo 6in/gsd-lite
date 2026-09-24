@@ -1,6 +1,6 @@
 ---
 name: gsd-lite-plan
-description: gsd-lite のプランニングフェーズ（無人ループから Claude Code / Codex で起動）。REQUIREMENTS / DECISIONS / RESEARCH から 1 ターン粒度のタスク列 PLAN.md を作成する。
+description: gsd-lite のプランニングフェーズ（無人ループから Claude Code / Codex / OpenCode で起動）。REQUIREMENTS / DECISIONS / RESEARCH から 1 ターン粒度のタスク列 PLAN.md を作成する。
 disable-model-invocation: true
 ---
 

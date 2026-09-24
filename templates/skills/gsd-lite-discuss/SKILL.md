@@ -14,7 +14,8 @@ disable-model-invocation: true
 
 ## ホストへの適応
 
-- Claude Code は `/gsd-lite-discuss`、Codex は `$gsd-lite-discuss` で呼び出す。
+- Claude Code は `/gsd-lite-discuss`、Codex は `$gsd-lite-discuss`、OpenCode は
+  `/gsd-lite-discuss`（install.sh が置くコマンドが本スキルを読み込む）で呼び出す。
 - 以下の AskUserQuestion / AUQ は対話による確認を意味する。Codex では利用可能な
   質問ツールの制限に合わせて分割し、利用できなければ通常の対話で質問する。
   multiSelect がなければ複数項目をテキストで答えてもらう。
@@ -22,8 +23,10 @@ disable-model-invocation: true
   ループが Codex のスキル参照へ変換する。
 - state の `engine` とモデル設定を確認してから起動する。Codex のモデルは
   `codex.model.<phase>`、推論強度は `codex.reasoning_effort.<phase>`。
-  空なら Codex CLI の設定を使用する。
-- 次のマイルストーンに移るときも `engine` / `phase_engines` / `model` / `codex` は保持する。
+  OpenCode のモデルは `opencode.model.<phase>`（`provider/model` 形式）、
+  推論強度は `opencode.variant.<phase>`、エージェントは `opencode.agent.<phase>`。
+  空ならその CLI の設定を使用する。
+- 次のマイルストーンに移るときも `engine` / `phase_engines` / `model` / `codex` / `opencode` は保持する。
 - 監視用サブエージェントが利用できない場合は `gsd-lite-loop.sh --status` で
   確認する方法を案内する。
 
@@ -100,7 +103,7 @@ VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、
    - research の調査対象（similar_oss / official_docs / local_projects、
      multiSelect・デフォルト全選択）→ state.json の `research.targets` へ
 4. **実行パターンを選ぶ（ループ起動前に毎回）**:
-   - 対話しているホストと実行エンジンは独立。Claude Code から Codex に任せてもよい。
+   - 対話しているホストと実行エンジンは独立。Claude Code から Codex や OpenCode に任せてもよい。
    - 現在の設定をフェーズ別に表示し、次のパターンを対話で選んでもらう。
      選択肢数の上限に合わせて「すべて同じ / 役割を分ける / 現在の設定を使う」
      → 具体的なパターンの順に分けてもよい。未回答のまま起動しない。
@@ -114,19 +117,24 @@ VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、
      | 実装だけ Codex、ほかは Claude | claude | `{"impl":"codex"}` |
      | レビューだけ Codex、ほかは Claude | claude | `{"verify":"codex"}` |
      | 実装・レビューは Codex、調査・計画は Claude | claude | `{"impl":"codex","verify":"codex"}` |
-     | カスタム | 現在の既定値 | research / plan / impl / verify を個別に選択 |
+     | すべて OpenCode | opencode | `{}` |
+     | 実装だけ OpenCode、ほかは Claude | claude | `{"impl":"opencode"}` |
+     | カスタム | 現在の既定値 | research / plan / impl / verify を個別に `claude` / `codex` / `opencode` から選択 |
 
    - プリセット選択時は `phase_engines` を表の値で**置き換える**。
      前回の割り当てを残さない。現在の設定を維持する場合だけ変更しない。
    - 各フェーズのエンジンとモデル（未指定なら CLI 既定）を一覧で提示する。
      モデル変更希望があれば Claude は `model.<phase>`、
-     Codex は `codex.model.<phase>` / `codex.reasoning_effort.<phase>` に設定する。
+     Codex は `codex.model.<phase>` / `codex.reasoning_effort.<phase>`、
+     OpenCode は `opencode.model.<phase>`（`provider/model`）/ `opencode.variant.<phase>` に設定する。
    - **選択したエンジンの準備**: 現在のホストのインストール済みテンプレートを使い、
-     Claude が含まれれば `.claude/skills/`、Codex が含まれれば `.agents/skills/` に
+     Claude が含まれれば `.claude/skills/`、Codex が含まれれば `.agents/skills/`、
+     OpenCode が含まれれば `.opencode/skills/` に
      5 スキルを配置する。既存スキルに独自変更があれば無断で上書きせず確認する。
      Claude が含まれる場合は Claude 用 init の allowlist マージ手順も行う。
      テンプレートがなければ `install.sh --engine all` を案内して準備完了まで待つ。
-     Codex ホストのテンプレートに allowlist がない場合は
+     Codex / OpenCode ホストのテンプレートに allowlist がない場合は
+
      `~/.claude/gsd-lite/templates/settings.allowlist.json` を使う。
    - どちらのホストでも、必要な CLI が PATH 上にあり、認証・権限が準備済みか確認する。
      `GSD_LITE_ENGINE` が設定されていれば**全フェーズを上書きする**ので、
