@@ -166,10 +166,10 @@ gsd-lite/
   "verify_round": 0,
   "verify_round_max": 2,
   "model": {
-    "research": "claude-sonnet-5",
-    "plan":   "claude-opus-5",
-    "impl":   "claude-sonnet-5",
-    "verify": "claude-opus-5"
+    "research": "claude-fable-5-1",
+    "plan":   "claude-fable-5-1",
+    "impl":   "claude-opus-5",
+    "verify": "claude-fable-5-1"
   },
   "updated_at": "2026-09-09T10:23:00+09:00"
 }
