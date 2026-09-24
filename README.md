@@ -31,8 +31,13 @@ claude
 進捗確認（トークンゼロ）:
 
 ```bash
-gsd-lite-loop.sh --status
+gsd-lite-loop.sh --status   # 1 回表示
+gsd-lite-loop.sh --watch    # 簡易 TUI: 状態・PLAN のタスク・実行中ターンのログを数秒ごとに再描画
 ```
+
+`--watch` は bash と jq だけで動く読み取り専用の画面で、`q` で終了、`s` で `--stop` と同じ中断依頼、
+`+` / `-` でログの表示行数を増減する。間隔は `GSD_LITE_WATCH_INTERVAL`（既定 3 秒）、
+ログ行数は `GSD_LITE_WATCH_LOG_LINES`（既定 15）。`--watch-once` は 1 画面ぶんを出力して終了する。
 
 終了コード: 0=DONE（ローカル: マージ済み / リモート: MR 作成済み）/ 2=BLOCKED（`.gsd-lite/BLOCKED.md` 参照）/
 3=max_turns / 4=discuss 未完了 / 7=一時中断。通知が欲しければ `.gsd-lite/hooks/on-exit.sh` と
@@ -295,7 +300,7 @@ gsd-lite-loop.sh --stop
 
 実行中のタスクはコミット・後処理まで完了させ、次のタスクを開始する前に中断する。
 `--stop` 自体は依頼を記録してすぐ終了する。停止したかは
-`gsd-lite-loop.sh --status` の `loop` と `stop` を確認する。
+`gsd-lite-loop.sh --status` の `loop` と `stop` を確認する（`--watch` 画面の `s` キーでも同じ依頼ができる）。
 
 通常と同じコマンドで、保存された次のタスクから再開する。
 

@@ -8,6 +8,8 @@
 #   gsd-lite-loop.sh --check    # 全フェーズの実行前提を検証（起動・変更なし）
 #   gsd-lite-loop.sh --status   # 進捗の整形表示（トークンゼロの覗き窓）
 #   gsd-lite-loop.sh --stop     # 現在のターン終了後に中断を依頼
+#   gsd-lite-loop.sh --watch    # 進捗・タスク・実行中ログを数秒ごとに再描画する簡易 TUI（q で終了）
+#   gsd-lite-loop.sh --watch-once # --watch の 1 画面ぶんを出力して終了（非対話・テスト用）
 #
 # 環境変数:
 #   GSD_LITE_ENGINE            claude / codex / opencode（未指定時 state.engine、旧 state は claude）
@@ -22,6 +24,8 @@
 #   GSD_LITE_OPENCODE_MODEL    OpenCode の全フェーズ共通モデル（provider/model 形式。state.opencode.model より優先）
 #   GSD_LITE_CLAUDE_BIN        claude バイナリの上書き（テスト用スタブ差し込み）
 #   GSD_LITE_PERMISSION_MODE   claude -p の --permission-mode（デフォルト acceptEdits）
+#   GSD_LITE_WATCH_INTERVAL    --watch の再描画間隔秒（デフォルト 3）
+#   GSD_LITE_WATCH_LOG_LINES   --watch で表示するログ末尾の行数（デフォルト 15。+/- キーで増減）
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
 #                              kill し、進捗なし→リトライ経路に乗せる）
 #
@@ -207,6 +211,67 @@ status() {
   fi
 }
 
+# ---- watch（簡易 TUI）----
+# --status の内容に PLAN のタスク一覧と実行中ターンのログ tail を足し、数秒ごとに再描画する。
+# 読み取り専用。state.json や git には触らない（`s` キーだけが --stop と同じフラグを置く）。
+
+WATCH_LOG_LINES="${GSD_LITE_WATCH_LOG_LINES:-15}"
+
+latest_turn_log() { # 最新のターンログ（マイルストーン別ディレクトリ内で更新時刻が最新のもの）
+  local milestone
+  milestone=$(sget '.milestone // empty')
+  ls -t "$GSD_DIR/logs/${milestone:-default}"/turn-*.log 2>/dev/null | head -n 1
+}
+
+watch_render() { # 1 画面ぶんを標準出力に描く
+  local cols log line n
+  cols=$(tput cols 2>/dev/null || echo 120)
+  status
+  if [ -f "$GSD_DIR/PLAN.md" ]; then
+    echo "-- tasks --"
+    n=0
+    while IFS= read -r line; do
+      n=$((n + 1))
+      [ "$n" -gt 20 ] && { echo "  ..."; break; }
+      case "$line" in
+        '- [ ]'*) printf '  %s\n' "$line" ;;
+        *) printf '  \033[2m%s\033[0m\n' "$line" ;;
+      esac
+    done < <(grep -E '^- \[( |x)\]' "$GSD_DIR/PLAN.md")
+  fi
+  log=$(latest_turn_log)
+  if [ -n "$log" ]; then
+    echo "-- log: ${log#$GSD_DIR/logs/} (last $WATCH_LOG_LINES lines) --"
+    tail -n "$WATCH_LOG_LINES" "$log" | cut -c1-"$cols"
+  fi
+}
+
+watch() {
+  [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first)"
+  local interval="${GSD_LITE_WATCH_INTERVAL:-3}" key rc
+  trap 'tput cnorm 2>/dev/null; echo' EXIT
+  tput civis 2>/dev/null
+  while true; do
+    printf '\033[H\033[2J'
+    watch_render 2>&1
+    echo
+    echo "[q] quit  [s] request stop  [+/-] log lines  (refresh every ${interval}s)"
+    key=
+    read -r -t "$interval" -n 1 -s key
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      case "$key" in
+        q|Q) break ;;
+        s|S) mkdir -p "$GSD_DIR/logs" && touch "$STOPFILE" ;;
+        +) WATCH_LOG_LINES=$((WATCH_LOG_LINES + 5)) ;;
+        -) [ "$WATCH_LOG_LINES" -gt 5 ] && WATCH_LOG_LINES=$((WATCH_LOG_LINES - 5)) ;;
+      esac
+    elif [ "$rc" -le 128 ]; then
+      break   # stdin が閉じた（端末ではない）→ 終了
+    fi
+  done
+}
+
 # ---- entry ----
 
 case "${1:-}" in
@@ -217,6 +282,8 @@ case "${1:-}" in
     echo "gsd-lite: stop requested; the active turn will finish before stopping"
     exit 0 ;;
   --status) status; exit 0 ;;
+  --watch) command -v jq >/dev/null || die "jq is required"; watch; exit 0 ;;
+  --watch-once) command -v jq >/dev/null || die "jq is required"; [ -f "$STATE" ] || die "no $STATE here"; watch_render; exit 0 ;;
   --check)
     command -v jq >/dev/null || die "jq is required"
     [ -f "$STATE" ] || die "no $STATE here"
@@ -224,7 +291,7 @@ case "${1:-}" in
     echo "gsd-lite: execution configuration ready"
     exit 0 ;;
   "") ;;
-  *) die "unknown option: $1 (supported: --status, --check, --stop)" ;;
+  *) die "unknown option: $1 (supported: --status, --watch, --check, --stop)" ;;
 esac
 
 command -v jq >/dev/null || die "jq is required"

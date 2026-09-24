@@ -609,5 +609,31 @@ GSD_LITE_INSTALL_ROOT="$install_root" "$REPO_DIR/install.sh" --engine all > "$TE
 assert_eq "all engines install" "$?" "0"
 [ -f "$install_root/.agents/skills/gsd-lite-init/SKILL.md" ] && [ -f "$install_root/.claude/skills/gsd-lite-init/SKILL.md" ] && ok "all installs three engines" || ng "all missed an engine"
 
+echo "== Test 26: --watch（簡易 TUI）は読み取り専用で 1 画面を描く =="
+make_project "$TESTROOT/w26"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+printf -- '- [x] done task\n- [ ] current task\n- [ ] later task\n' > .gsd-lite/PLAN.md
+echo "hello from the turn" >> "$(ls -t .gsd-lite/logs/toy/turn-*.log | head -n 1)"
+before=$(git rev-parse HEAD)
+out=$(GSD_LITE_WATCH_LOG_LINES=3 "$LOOP" --watch-once)
+assert_eq "watch-once exits 0" "$?" "0"
+echo "$out" | grep -q 'phase     : done' && ok "watch shows status" || ng "watch status"
+echo "$out" | grep -q -- '-- tasks --' && ok "watch shows task section" || ng "watch tasks section"
+echo "$out" | grep -q -- '- \[ \] current task' && ok "watch lists unchecked task" || ng "watch unchecked task"
+echo "$out" | grep -q -- '- \[x\] done task' && ok "watch lists done task" || ng "watch done task"
+echo "$out" | grep -q -- '-- log: toy/turn-005-attempt1.log (last 3 lines) --' && ok "watch names latest log" || ng "watch log header"
+echo "$out" | grep -q 'hello from the turn' && ok "watch tails the log" || ng "watch log tail"
+echo "$out" | grep -q 'route     : impl -> claude (model: sonnet-stub)' && ok "watch shows route models" || ng "watch route"
+assert_eq "watch-once touches nothing" "$(git status --porcelain | grep -v PLAN.md | wc -l)" "0"
+GSD_LITE_WATCH_INTERVAL=1 "$LOOP" --watch < /dev/null > "$TESTROOT/watch.log" 2>&1
+assert_eq "watch exits when stdin is closed" "$?" "0"
+[ ! -e .gsd-lite/logs/.stop ] && ok "watch alone requests no stop" || ng "watch created stop flag"
+printf s | GSD_LITE_WATCH_INTERVAL=1 "$LOOP" --watch > "$TESTROOT/watch.log" 2>&1
+assert_eq "watch s key then EOF exits 0" "$?" "0"
+[ -e .gsd-lite/logs/.stop ] && ok "s key requests stop" || ng "s key did not request stop"
+assert_eq "watch keeps HEAD" "$(git rev-parse HEAD)" "$before"
+"$LOOP" --bogus > "$TESTROOT/watch.log" 2>&1
+grep -q -- '--watch' "$TESTROOT/watch.log" && ok "usage lists --watch" || ng "usage missing --watch"
+
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
