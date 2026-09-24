@@ -24,6 +24,12 @@
 #   GSD_LITE_OPENCODE_MODEL    OpenCode の全フェーズ共通モデル（provider/model 形式。state.opencode.model より優先）
 #   GSD_LITE_CLAUDE_BIN        claude バイナリの上書き（テスト用スタブ差し込み）
 #   GSD_LITE_PERMISSION_MODE   claude -p の --permission-mode（デフォルト acceptEdits）
+#   GSD_LITE_CLAUDE_TOKEN_VARS 任意。Claude のターンで CLAUDE_CODE_OAUTH_TOKEN に使うトークンを
+#                              保持している環境変数「名」の空白区切りリスト（例 "TOK_ORG_A TOK_ORG_B"）。
+#                              設定すると Claude のターンごとにラウンドロビンで切り替える
+#                              （`claude setup-token` で取得した組織ごとのトークンを順番に使う用途）。
+#                              未設定なら従来通り親環境の CLAUDE_CODE_OAUTH_TOKEN をそのまま使う。
+#                              値はログ・出力に出さず、変数名だけを表示する。次に使う位置は logs/.token_index
 #   GSD_LITE_WATCH_INTERVAL    --watch の再描画間隔秒（デフォルト 3）
 #   GSD_LITE_WATCH_LOG_LINES   --watch で表示するログ末尾の行数（デフォルト 15。+/- キーで増減）
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
@@ -46,6 +52,8 @@ STATE="$GSD_DIR/state.json"
 PIDFILE="$GSD_DIR/loop.pid"        # 情報表示用（排他は flock が担う）
 LOCKFILE="$GSD_DIR/logs/.lock"     # logs/ は gitignore 済み
 RETRYFILE="$GSD_DIR/logs/.retry"
+TOKENFILE="$GSD_DIR/logs/.token_index"   # トークンのラウンドロビン位置（実行時情報）
+TOKEN_VARS=()                           # check_claude_tokens が GSD_LITE_CLAUDE_TOKEN_VARS から埋める
 STOPFILE="$GSD_DIR/logs/.stop"    # 実行時情報。gitignore 済み logs/ に置く
 CLAUDE_BIN="${GSD_LITE_CLAUDE_BIN:-claude}"
 PERMISSION_MODE="${GSD_LITE_PERMISSION_MODE:-acceptEdits}"
@@ -139,6 +147,46 @@ check_config() {
   done
   check_git_identity
   check_codex_sandbox
+  check_claude_tokens
+}
+
+check_claude_tokens() {
+  # 任意機能。Claude を使うフェーズがあり GSD_LITE_CLAUDE_TOKEN_VARS が設定されていれば、
+  # 列挙された変数名が妥当で、すべて非空であることを起動前に確認する（途中で空トークンに当たって
+  # 無進捗 → auto-BLOCKED になるのを防ぐ）。値は一切表示しない
+  local name uses_claude=0 p
+  TOKEN_VARS=()
+  [ -n "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ] || return 0
+  for p in research plan impl verify; do
+    [ "$(engine_for "$p")" = claude ] && uses_claude=1
+  done
+  [ "$uses_claude" -eq 1 ] || return 0
+  read -r -a TOKEN_VARS <<< "$GSD_LITE_CLAUDE_TOKEN_VARS"
+  [ "${#TOKEN_VARS[@]}" -gt 0 ] || die "GSD_LITE_CLAUDE_TOKEN_VARS is set but lists no variable names"
+  for name in "${TOKEN_VARS[@]}"; do
+    case "$name" in
+      [A-Za-z_]*) ;;
+      *) die "invalid variable name in GSD_LITE_CLAUDE_TOKEN_VARS: $name" ;;
+    esac
+    case "$name" in
+      *[!A-Za-z0-9_]*) die "invalid variable name in GSD_LITE_CLAUDE_TOKEN_VARS: $name" ;;
+    esac
+    [ -n "${!name:-}" ] || die "token variable $name (listed in GSD_LITE_CLAUDE_TOKEN_VARS) is unset or empty — export it (e.g. from \`claude setup-token\`) before starting"
+  done
+}
+
+token_index() { # 次に使うトークン変数の添字（0 始まり）
+  local idx
+  idx=$(cat "$TOKENFILE" 2>/dev/null || echo 0)
+  case "$idx" in ''|*[!0-9]*) idx=0 ;; esac
+  echo $((idx % ${#TOKEN_VARS[@]}))
+}
+
+next_token_var() { # ラウンドロビンで変数名を返し、位置を進める
+  local idx
+  idx=$(token_index)
+  echo $(( (idx + 1) % ${#TOKEN_VARS[@]} )) > "$TOKENFILE"
+  printf '%s\n' "${TOKEN_VARS[$idx]}"
 }
 
 check_git_identity() {
@@ -187,6 +235,13 @@ status() {
     echo "route     : $display_phase -> $display_engine (model: ${display_model:-CLI default})"
   done
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
+  if [ -n "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ]; then
+    # 表示だけなので値の検証はしない（検証は --check / 起動時）
+    read -r -a TOKEN_VARS <<< "$GSD_LITE_CLAUDE_TOKEN_VARS"
+    if [ "${#TOKEN_VARS[@]}" -gt 0 ]; then
+      echo "token     : rotating ${#TOKEN_VARS[@]} vars (next: ${TOKEN_VARS[$(token_index)]})"
+    fi
+  fi
   if [ -f "$STOPFILE" ]; then
     echo "stop      : requested (cleared on next start)"
   else
@@ -392,13 +447,22 @@ while true; do
     agent_args=(-p "$cmd" --permission-mode "$PERMISSION_MODE")
     [ -z "$model" ] || agent_args+=(--model "$model")
   fi
-  echo "gsd-lite: turn $((turn_before + 1)) [$ENGINE/$phase] $cmd (attempt $((retry + 1)))"
+  # 任意: Claude のターンは GSD_LITE_CLAUDE_TOKEN_VARS のトークンをラウンドロビンで使う。
+  # 値は env の引数に載せず（ps に見えない）、サブシェルで export してから起動する
+  token_var=
+  if [ "$ENGINE" = claude ] && [ "${#TOKEN_VARS[@]}" -gt 0 ]; then
+    token_var=$(next_token_var)
+  fi
+  echo "gsd-lite: turn $((turn_before + 1)) [$ENGINE/$phase] $cmd (attempt $((retry + 1)))${token_var:+ (token: $token_var)}"
   # 親が Claude Code セッションでもネスト起動できるよう、セッション由来の環境変数を除去。
   # timeout でハングを検知し（超過は kill）、進捗なし→リトライ経路に乗せる
-  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
-    timeout -k 30 "${GSD_LITE_TURN_TIMEOUT:-3600}" \
-    "$AGENT_BIN" "${agent_args[@]}" \
-    < /dev/null > "$log" 2>&1 9>&-
+  (
+    [ -z "$token_var" ] || export CLAUDE_CODE_OAUTH_TOKEN="${!token_var}"
+    exec env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
+      timeout -k 30 "${GSD_LITE_TURN_TIMEOUT:-3600}" \
+      "$AGENT_BIN" "${agent_args[@]}" \
+      < /dev/null > "$log" 2>&1 9>&-
+  )
   rc=$?
 
   # 進捗判定は rc に依らず「コミット済み (HEAD) の state」で行う。

@@ -6,7 +6,7 @@ trap 'rm -rf "$TESTROOT"' EXIT
 LOOP=$(cd "$(dirname "$0")/.." && pwd)/bin/gsd-lite-loop.sh
 REPO_DIR=$(dirname "$(dirname "$LOOP")")
 # 呼び出し元のエンジン設定をテストに持ち込まない。
-unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL
+unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL GSD_LITE_CLAUDE_TOKEN_VARS CLAUDE_CODE_OAUTH_TOKEN
 # スタブは `codex sandbox` を実装しないので、sandbox probe は専用テスト以外で飛ばす。
 export GSD_LITE_CODEX_SANDBOX_PROBE=skip
 PASS=0; FAIL=0
@@ -634,6 +634,42 @@ assert_eq "watch s key then EOF exits 0" "$?" "0"
 assert_eq "watch keeps HEAD" "$(git rev-parse HEAD)" "$before"
 "$LOOP" --bogus > "$TESTROOT/watch.log" 2>&1
 grep -q -- '--watch' "$TESTROOT/watch.log" && ok "usage lists --watch" || ng "usage missing --watch"
+
+echo "== Test 27: Claude トークンのラウンドロビン（GSD_LITE_CLAUDE_TOKEN_VARS、任意） =="
+cat > "$TESTROOT/bin/claude-token" <<'EOF'
+#!/usr/bin/env bash
+echo "${CLAUDE_CODE_OAUTH_TOKEN:-<unset>}" >> .gsd-lite/token-seen.log
+exec "$(dirname "$0")/claude-happy" "$@"
+EOF
+chmod +x "$TESTROOT/bin/claude-token"
+make_project "$TESTROOT/t27"
+TOK_A=secret-aaa TOK_B=secret-bbb TOK_C=secret-ccc GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B TOK_C" \
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-token" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "rotation cycle DONE" "$?" "0"
+assert_eq "tokens rotate per turn" "$(paste -sd, .gsd-lite/token-seen.log)" "secret-aaa,secret-bbb,secret-ccc,secret-aaa,secret-bbb"
+assert_eq "turn lines name the variable" "$(grep -c '(token: TOK_' "$TESTROOT/loop-out.log")" "5"
+grep -q 'secret-' "$TESTROOT/loop-out.log" && ng "token value leaked to loop output" || ok "token values never printed"
+assert_eq "rotation index kept in logs/" "$(cat .gsd-lite/logs/.token_index)" "2"
+assert_eq "rotation index not committed" "$(git status --porcelain | wc -l)" "0"
+out=$(TOK_A=x TOK_B=y TOK_C=z GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B TOK_C" "$LOOP" --status)
+echo "$out" | grep -q 'token     : rotating 3 vars (next: TOK_C)' && ok "status shows next token var" || ng "status token line"
+out=$(GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_MISSING" "$LOOP" --status)
+assert_eq "status survives an unset token var" "$?" "0"
+echo "$out" | grep -q 'token     : rotating 2 vars (next: TOK_A)' && ok "status shows rotation without validating" || ng "status with unset var"
+make_project "$TESTROOT/t27b"
+TOK_A=secret-aaa GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_MISSING" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "unset token variable fails --check" "$?" "6"
+grep -q 'TOK_MISSING' "$TESTROOT/check.log" && ok "check names the missing variable" || ng "missing variable message"
+GSD_LITE_CLAUDE_TOKEN_VARS="bad-name" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "invalid variable name rejected" "$?" "6"
+TOK_A=secret-aaa GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_MISSING" GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-token" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "unset token variable stops before turns" "$?" "6"
+[ ! -e .gsd-lite/token-seen.log ] && ok "no turn ran with a missing token" || ng "turn ran with missing token"
+CLAUDE_CODE_OAUTH_TOKEN=parent-token GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-token" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "without the option the parent token passes through" "$(sort -u .gsd-lite/token-seen.log | paste -sd,)" "parent-token"
+make_codex_project "$TESTROOT/t27c"
+GSD_LITE_CLAUDE_TOKEN_VARS="TOK_MISSING" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "codex-only project ignores Claude token vars" "$?" "0"
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

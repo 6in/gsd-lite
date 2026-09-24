@@ -90,6 +90,7 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 | `GSD_LITE_CODEX_SANDBOX` | 既定: `workspace-write`。bubblewrap が使えない環境では `danger-full-access`（sandbox なし。隔離環境向け） |
 | `GSD_LITE_CODEX_SANDBOX_PROBE` | 既定: `auto`。Codex を使うフェーズがあれば起動前に `codex sandbox -- true` で sandbox の実効性を検証する。`skip` で省略 |
 | `GSD_LITE_TURN_TIMEOUT` | 1 ターンの制限秒数（既定: 3600、両エンジン共通） |
+| `GSD_LITE_CLAUDE_TOKEN_VARS` | 任意。Claude のターンで使う `CLAUDE_CODE_OAUTH_TOKEN` を、列挙した環境変数名からターンごとにラウンドロビンで切り替える（下記） |
 
 Codex は `approval_policy=never` で実行し、コミットのために Git 管理ディレクトリを
 `--add-dir` で渡す（linked worktree の共通 Git ディレクトリも含む）。
@@ -231,6 +232,47 @@ gsd-lite-loop.sh --status     # route 行で各フェーズのエンジンとモ
 テンプレートの既定値（新規プロジェクトに配られる値）を変えたい場合は
 `templates/state.json` を編集して `./install.sh` を再実行する。既存プロジェクトの
 state.json には反映されないので、上の手順で個別に変更する。
+
+## Claude のトークンを組織ごとに切り替える（任意）
+
+複数の組織（グループ）に所属していて、`claude setup-token` で取得したトークンを
+ターンごとに順番に使いたい場合の機能。**未設定なら何も変わらない**（親環境の
+`CLAUDE_CODE_OAUTH_TOKEN` がそのまま使われる）。
+
+トークンの値ではなく、**値を保持している環境変数の名前**を `GSD_LITE_CLAUDE_TOKEN_VARS` に
+空白区切りで列挙する。ループは Claude のターンを起動するたびに次の変数を選び、その値を
+`CLAUDE_CODE_OAUTH_TOKEN` として `claude -p` に渡す。
+
+手順:
+
+1. 組織ごとにトークンを取得する。対話の `claude` で `/login` してその組織を選び、
+   ログイン状態で `claude setup-token` を実行すると長期トークンが表示される。これを組織の数だけ繰り返す
+2. 取得したトークンを、組織ごとに別名の環境変数へ入れる（シェルの rc や secret manager から export。
+   リポジトリや `.gsd-lite/` には書かない）
+3. 変数名を `GSD_LITE_CLAUDE_TOKEN_VARS` に列挙してループを起動する
+
+```bash
+# 2. 各組織のトークンを環境変数に入れておく
+export CLAUDE_TOKEN_ORG_A='sk-ant-oat01-...'   # 組織 A でログインして claude setup-token
+export CLAUDE_TOKEN_ORG_B='sk-ant-oat01-...'   # 同、組織 B
+export CLAUDE_TOKEN_ORG_C='sk-ant-oat01-...'   # 同、組織 C
+
+# 3. 変数名を列挙して起動（値ではなく名前を渡す）
+export GSD_LITE_CLAUDE_TOKEN_VARS="CLAUDE_TOKEN_ORG_A CLAUDE_TOKEN_ORG_B CLAUDE_TOKEN_ORG_C"
+gsd-lite-loop.sh --check    # 3 変数がすべて非空か確認
+gsd-lite-loop.sh            # ターンごとに A → B → C → A … と切り替えて実行
+gsd-lite-loop.sh --status   # token 行に「次に使う変数名」が出る
+```
+
+- 順番は A → B → C → A … で、リトライも 1 回と数えて次に進む。位置は `.gsd-lite/logs/.token_index`
+  に保存され（gitignore 済み）、ループを再開しても続きから回る
+- 値はログにも画面にも出さず、`turn N [claude/impl] ... (token: CLAUDE_TOKEN_ORG_B)` のように
+  変数名だけを表示する。`--status` / `--watch` の `token` 行で次に使う変数が分かる
+- `--check` と通常起動は、Claude を使うフェーズがある場合に列挙された変数がすべて非空であることを
+  確認し、欠けていれば終了コード 6 で止める（途中で空トークンに当たって無進捗になるのを防ぐ）
+- Codex / OpenCode のターンには影響しない。全フェーズが Codex / OpenCode なら無視される
+- 各トークンは自分のマシン用に取得したもので、値の管理・失効は利用者側の責任。
+  `.gsd-lite/` や state.json にトークンを書かないこと
 
 ## ループ開始前に実行パターンを選ぶ
 
