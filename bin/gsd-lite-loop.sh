@@ -235,6 +235,7 @@ status() {
     echo "route     : $display_phase -> $display_engine (model: ${display_model:-CLI default})"
   done
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
+  echo "subagents : $(sget '.subagents // "auto"')"
   if [ -n "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ]; then
     # 表示だけなので値の検証はしない（検証は --check / 起動時）
     read -r -a TOKEN_VARS <<< "$GSD_LITE_CLAUDE_TOKEN_VARS"

@@ -4,6 +4,7 @@
   "phase_engines": {},
   "codex": { "model": {}, "reasoning_effort": {} },
   "opencode": { "model": {}, "variant": {}, "agent": {} },
+  "subagents": "auto",
   "milestone": "",
   "phase": "discuss",
   "next_command": "DISCUSS",

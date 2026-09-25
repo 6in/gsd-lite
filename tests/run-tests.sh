@@ -146,6 +146,7 @@ cd "$TESTROOT/p1"
 out=$("$LOOP" --status)
 echo "$out" | grep -q "phase     : done" && ok "status shows phase" || ng "status phase"
 echo "$out" | grep -q "loop      : not running" && ok "status shows not running" || ng "status running state"
+echo "$out" | grep -q "subagents : auto" && ok "status shows subagents default" || ng "status subagents"
 
 echo "== Test 6: max_turns 事前判定と番兵の優先 =="
 make_project "$TESTROOT/p6"

@@ -26,7 +26,8 @@ disable-model-invocation: true
   OpenCode のモデルは `opencode.model.<phase>`（`provider/model` 形式）、
   推論強度は `opencode.variant.<phase>`、エージェントは `opencode.agent.<phase>`。
   空ならその CLI の設定を使用する。
-- 次のマイルストーンに移るときも `engine` / `phase_engines` / `model` / `codex` / `opencode` は保持する。
+- 次のマイルストーンに移るときも `engine` / `phase_engines` / `model` / `codex` / `opencode` /
+  `subagents` は保持する。
 - 監視用サブエージェントが利用できない場合は `gsd-lite-loop.sh --status` で
   確認する方法を案内する。
 
@@ -127,6 +128,11 @@ VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、
      モデル変更希望があれば Claude は `model.<phase>`、
      Codex は `codex.model.<phase>` / `codex.reasoning_effort.<phase>`、
      OpenCode は `opencode.model.<phase>`（`provider/model`）/ `opencode.variant.<phase>` に設定する。
+   - **サブエージェントの利用**を AUQ で選ぶ（state の `subagents`。既存値があればそれを既定に）:
+     - `auto`（推奨）: impl はタスクの並列サブ作業をサブエージェントで並行実装し、verify は
+       レビューとセキュリティチェックを並列化する。ターンあたりのトークン消費は増える。
+       対応していないエンジン（Codex exec 等）のフェーズでは自動的に従来動作になる
+     - `off`: 従来通り 1 エージェントが順に実装・検証する（コスト重視・小規模向け）
    - **選択したエンジンの準備**: 現在のホストのインストール済みテンプレートを使い、
      Claude が含まれれば `.claude/skills/`、Codex が含まれれば `.agents/skills/`、
      OpenCode が含まれれば `.opencode/skills/` に
@@ -153,7 +159,7 @@ VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、
    - 現在のブランチ（= base）名を控え、`git checkout -b gsd-lite/<slug>`
    - state.json を**すべて更新してから**コミットする: `milestone`（kebab-case の
      スラッグ）/ `branch`（name と base）/ `research.targets` / `phase: "research"` /
-     `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `updated_at`。
+     `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `subagents` / `updated_at`。
      そのうえで REQUIREMENTS.md / DECISIONS.md / state.json と追加・更新したスキル・設定を一括コミット
      （`gsd-lite(discuss): <slug> 要件確定`）。
      **遷移（next_command）までコミットに含めるのが重要** — コミット後に state を

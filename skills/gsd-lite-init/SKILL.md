@@ -52,6 +52,8 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
      `opencode.variant.<phase>`、エージェントは `opencode.agent.<phase>` に設定する。
      フェーズ別モデルは後から `.gsd-lite/state.json` を直接編集して変えられる
      （README「フェーズ別モデルの変更」）。
+     `subagents`（`auto` / `off`）はテンプレートの `auto` のままでよい。discuss がループ起動前に
+     確認する。古い state にキーがなければ `auto` として扱われる
    - `~/.claude/gsd-lite/templates/PLAN.template.md` → `.gsd-lite/PLAN.template.md`
    - `~/.claude/gsd-lite/templates/skills/` 配下 5 スキル → `.claude/skills/`
 4. **allowlist マージ**: `~/.claude/gsd-lite/templates/settings.allowlist.json` の
