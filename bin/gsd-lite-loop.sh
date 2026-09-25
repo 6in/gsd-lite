@@ -35,6 +35,9 @@
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
 #                              kill し、進捗なし→リトライ経路に乗せる）
 #
+# 計測: 各試行の phase / engine / model / attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 /
+# 増えたコミット数を logs/<milestone>/turns.jsonl に 1 行ずつ追記する（reflect フェーズの客観材料）。
+#
 # 状態管理の原則: 信頼するのは「コミット済みの state」だけ。進捗判定は rc に依らず
 # HEAD の state で行い、各ターンの後に作業ツリーの state を HEAD へ正規化する
 # （「state は書いたがコミットしなかった」ターンを成功扱いしない）。ループ自身が
@@ -48,6 +51,7 @@
 set -u
 
 GSD_DIR=".gsd-lite"
+PHASES="research plan impl verify reflect"   # ループが扱うフェーズ（スキル gsd-lite-<phase> に対応）
 STATE="$GSD_DIR/state.json"
 PIDFILE="$GSD_DIR/loop.pid"        # 情報表示用（排他は flock が担う）
 LOCKFILE="$GSD_DIR/logs/.lock"     # logs/ は gitignore 済み
@@ -78,6 +82,29 @@ run_hook() { # run_hook <name> <args...> — フックの失敗は無視。ロ�
 
 committed_state() { # コミット済み (HEAD) の state から値を読む
   git show "HEAD:$STATE" 2>/dev/null | jq -r "$1"
+}
+
+record_turn() { # 1 試行ぶんの計測値を logs/<milestone>/turns.jsonl に追記（reflect の客観材料。トークン不要）
+  local head_after finished_epoch commits progressed
+  head_after=$(git rev-parse HEAD 2>/dev/null || echo "")
+  finished_epoch=$(date +%s)
+  commits=0
+  if [ -n "$head_before" ] && [ -n "$head_after" ] && [ "$head_before" != "$head_after" ]; then
+    commits=$(git rev-list --count "$head_before..$head_after" 2>/dev/null || echo 0)
+  fi
+  progressed=false
+  [ "$turn_after" -gt "$turn_before" ] && progressed=true
+  jq -nc \
+    --argjson turn "$((turn_before + 1))" --arg phase "$phase" --arg engine "$ENGINE" \
+    --arg model "$model" --argjson attempt "$((retry + 1))" --arg started "$started_at" \
+    --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson duration "$((finished_epoch - started_epoch))" \
+    --argjson rc "$rc" --argjson progressed "$progressed" --argjson commits "${commits:-0}" \
+    --arg head_before "$head_before" --arg head_after "$head_after" --arg log "$log" \
+    --arg token_var "$token_var" \
+    '{turn:$turn, phase:$phase, engine:$engine, model:$model, attempt:$attempt,
+      started_at:$started, finished_at:$finished, duration_s:$duration, rc:$rc,
+      progressed:$progressed, commits:$commits, head_before:$head_before, head_after:$head_after,
+      log:$log, token_var:$token_var}' >> "$logdir/turns.jsonl" 2>/dev/null || true
 }
 
 finish() { # finish <exit_code> — on-exit フックを呼んで終了
@@ -128,11 +155,16 @@ check_config() {
     (.engine // "claude" | . == "claude" or . == "codex" or . == "opencode") and
     ((.phase_engines // {}) | type == "object" and
       all(to_entries[];
-        (.key == "research" or .key == "plan" or .key == "impl" or .key == "verify") and
+        (.key == "research" or .key == "plan" or .key == "impl" or .key == "verify" or .key == "reflect") and
         (.value == "claude" or .value == "codex" or .value == "opencode")))
   ' "$STATE" >/dev/null || die "invalid engine / phase_engines configuration"
   CODEX_SANDBOX="${GSD_LITE_CODEX_SANDBOX:-workspace-write}"
-  for check_phase in research plan impl verify; do
+  for check_phase in $PHASES; do
+    # reflect: false のプロジェクトは reflect ターンが来ないので、そのスキル・CLI は要求しない
+    # （jq の // は false も未設定扱いにするので == false で判定する）
+    if [ "$check_phase" = reflect ] && [ "$(sget '.reflect == false')" = true ]; then
+      continue
+    fi
     select_engine "$check_phase"
     command -v "$AGENT_BIN" >/dev/null || die "$ENGINE binary not found: $AGENT_BIN (phase: $check_phase)"
     skill_dir=$(skill_dir_for "$ENGINE")
@@ -157,7 +189,7 @@ check_claude_tokens() {
   local name uses_claude=0 p
   TOKEN_VARS=()
   [ -n "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ] || return 0
-  for p in research plan impl verify; do
+  for p in $PHASES; do
     [ "$(engine_for "$p")" = claude ] && uses_claude=1
   done
   [ "$uses_claude" -eq 1 ] || return 0
@@ -204,7 +236,7 @@ check_codex_sandbox() {
   local probe_phase uses_codex=0 codex_bin
   [ "${GSD_LITE_CODEX_SANDBOX_PROBE:-auto}" = skip ] && return 0
   [ "$CODEX_SANDBOX" = danger-full-access ] && return 0
-  for probe_phase in research plan impl verify; do
+  for probe_phase in $PHASES; do
     [ "$(engine_for "$probe_phase")" = codex ] && uses_codex=1
   done
   [ "$uses_codex" -eq 1 ] || return 0
@@ -224,25 +256,31 @@ check_codex_sandbox() {
   fi
 }
 
+token_summary() { # トークン切り替えの状態 1 行（値は出さない。未設定でも出して気づけるようにする）
+  if [ -n "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ]; then
+    # 表示だけなので値の検証はしない（検証は --check / 起動時）
+    read -r -a TOKEN_VARS <<< "$GSD_LITE_CLAUDE_TOKEN_VARS"
+    if [ "${#TOKEN_VARS[@]}" -gt 0 ]; then
+      echo "token     : rotating ${#TOKEN_VARS[@]} vars (next: ${TOKEN_VARS[$(token_index)]})"
+      return
+    fi
+  fi
+  echo "token     : rotation off (GSD_LITE_CLAUDE_TOKEN_VARS unset; parent CLAUDE_CODE_OAUTH_TOKEN / login is used)"
+}
+
 status() {
   [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first)"
   echo "== gsd-lite status =="
   echo "engine    : ${GSD_LITE_ENGINE:-$(sget '.engine // "claude"')}"
   jq -r '"milestone : \(.milestone)\nphase     : \(.phase)\nturn      : \(.turn)/\(.max_turns)\nnext      : \(.next_command)\nverify    : round \(.verify_round)/\(.verify_round_max)\nbranch    : \(.branch.name) (base: \(.branch.base))\nupdated   : \(.updated_at)"' "$STATE"
-  for display_phase in research plan impl verify; do
+  for display_phase in $PHASES; do
     display_engine=$(engine_for "$display_phase")
     display_model=$(model_for "$display_engine" "$display_phase")
     echo "route     : $display_phase -> $display_engine (model: ${display_model:-CLI default})"
   done
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
   echo "subagents : $(sget '.subagents // "auto"')"
-  if [ -n "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ]; then
-    # 表示だけなので値の検証はしない（検証は --check / 起動時）
-    read -r -a TOKEN_VARS <<< "$GSD_LITE_CLAUDE_TOKEN_VARS"
-    if [ "${#TOKEN_VARS[@]}" -gt 0 ]; then
-      echo "token     : rotating ${#TOKEN_VARS[@]} vars (next: ${TOKEN_VARS[$(token_index)]})"
-    fi
-  fi
+  token_summary
   if [ -f "$STOPFILE" ]; then
     echo "stop      : requested (cleared on next start)"
   else
@@ -344,6 +382,7 @@ case "${1:-}" in
     command -v jq >/dev/null || die "jq is required"
     [ -f "$STATE" ] || die "no $STATE here"
     check_config
+    token_summary
     echo "gsd-lite: execution configuration ready"
     exit 0 ;;
   "") ;;
@@ -455,6 +494,9 @@ while true; do
     token_var=$(next_token_var)
   fi
   echo "gsd-lite: turn $((turn_before + 1)) [$ENGINE/$phase] $cmd (attempt $((retry + 1)))${token_var:+ (token: $token_var)}"
+  head_before=$(git rev-parse HEAD 2>/dev/null || echo "")
+  started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  started_epoch=$(date +%s)
   # 親が Claude Code セッションでもネスト起動できるよう、セッション由来の環境変数を除去。
   # timeout でハングを検知し（超過は kill）、進捗なし→リトライ経路に乗せる
   (
@@ -470,6 +512,7 @@ while true; do
   # 正常終了でも commit まで到達していなければ成功と認めない
   turn_after=$(committed_state '.turn')
   [ -n "$turn_after" ] || die "cannot read committed state (HEAD:$STATE)"
+  record_turn
   # ターン境界の正規化: 作業ツリーの state を HEAD に揃える（未コミットの書きかけを残さない）
   git checkout HEAD -- "$STATE" || die "failed to restore $STATE from HEAD"
 

@@ -29,7 +29,7 @@ make_project(){ # make_project <dir> — 足場コミット済みの git プロ�
   "research": {"targets": ["similar_oss"], "local_search_paths": []},
   "turn": 0, "max_turns": 10, "retry_max": 2,
   "verify_round": 0, "verify_round_max": 2,
-  "model": {"research": "sonnet-stub", "plan": "opus-stub", "impl": "sonnet-stub", "verify": "opus-stub"},
+  "model": {"research": "sonnet-stub", "plan": "opus-stub", "impl": "sonnet-stub", "verify": "opus-stub", "reflect": "haiku-stub"},
   "updated_at": ""
 }
 EOF
@@ -62,7 +62,13 @@ case "$cmd" in
   /gsd-lite-impl)
     left=$(( $(cat .gsd-lite/tasks_left) - 1 )); echo "$left" > .gsd-lite/tasks_left
     [ "$left" -le 0 ] && jqup '.phase="verify" | .next_command="/gsd-lite-verify"' ;;
-  /gsd-lite-verify)   jqup '.phase="done" | .next_command="DONE"' ;;
+  /gsd-lite-verify)
+    if [ "$(jq -r '.reflect == false' "$STATE")" = true ]; then
+      jqup '.phase="done" | .next_command="DONE"'
+    else
+      jqup '.phase="reflect" | .next_command="/gsd-lite-reflect"'
+    fi ;;
+  /gsd-lite-reflect)  jqup '.phase="done" | .next_command="DONE"' ;;
 esac
 jqup ".turn=$((turn+1)) | .updated_at=\"now\""
 git add -A >/dev/null && git commit -qm "stub turn $((turn+1))"
@@ -110,9 +116,18 @@ make_project "$TESTROOT/p1"
 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
 assert_eq "exit code 0 (DONE)" "$?" "0"
 assert_eq "final phase" "$(jq -r .phase .gsd-lite/state.json)" "done"
-assert_eq "total turns" "$(jq -r .turn .gsd-lite/state.json)" "5"
-assert_eq "log files (per-milestone dir)" "$(ls .gsd-lite/logs/toy/turn-*.log | wc -l)" "5"
-assert_eq "phase hooks fired" "$(grep -c '^phase ' .gsd-lite/hooks.log)" "4"
+assert_eq "total turns" "$(jq -r .turn .gsd-lite/state.json)" "6"
+assert_eq "log files (per-milestone dir)" "$(ls .gsd-lite/logs/toy/turn-*.log | wc -l)" "6"
+assert_eq "phase hooks fired" "$(grep -c '^phase ' .gsd-lite/hooks.log)" "5"
+grep -q 'haiku-stub' .gsd-lite/stub-args.log && ok "reflect model routing" || ng "reflect model routing"
+grep -q '\[claude/reflect\] /gsd-lite-reflect' "$TESTROOT/loop-out.log" && ok "reflect turn ran after verify" || ng "reflect turn missing"
+assert_eq "turns.jsonl has one record per attempt" "$(wc -l < .gsd-lite/logs/toy/turns.jsonl)" "6"
+assert_eq "turns.jsonl phases" "$(jq -r .phase .gsd-lite/logs/toy/turns.jsonl | paste -sd,)" "research,plan,impl,impl,verify,reflect"
+assert_eq "turns.jsonl records progress" "$(jq -r 'select(.progressed) | .turn' .gsd-lite/logs/toy/turns.jsonl | paste -sd,)" "1,2,3,4,5,6"
+assert_eq "turns.jsonl counts commits" "$(jq -r .commits .gsd-lite/logs/toy/turns.jsonl | sort -u)" "1"
+assert_eq "turns.jsonl model" "$(jq -r 'select(.phase=="reflect") | .model' .gsd-lite/logs/toy/turns.jsonl)" "haiku-stub"
+assert_eq "turns.jsonl attempt" "$(jq -r .attempt .gsd-lite/logs/toy/turns.jsonl | sort -u)" "1"
+jq -e 'has("duration_s") and has("started_at") and has("rc") and has("log")' .gsd-lite/logs/toy/turns.jsonl >/dev/null && ok "turns.jsonl fields" || ng "turns.jsonl fields"
 assert_eq "exit hook" "$(grep -c 'exit code=0 phase=done' .gsd-lite/hooks.log)" "1"
 grep -q "sonnet-stub" .gsd-lite/stub-args.log && ok "model routing passed" || ng "model routing"
 grep -q "permission-mode acceptEdits" .gsd-lite/stub-args.log && ok "permission mode passed" || ng "permission mode"
@@ -127,6 +142,7 @@ assert_eq "state is BLOCKED" "$(jq -r .next_command .gsd-lite/state.json)" "BLOC
 grep -q "auto" .gsd-lite/BLOCKED.md && ok "BLOCKED.md auto-written" || ng "BLOCKED.md missing"
 assert_eq "auto-BLOCKED is committed" "$(git show HEAD:.gsd-lite/state.json | jq -r .next_command)" "BLOCKED"
 assert_eq "attempts logged" "$(ls .gsd-lite/logs/toy/turn-001-attempt*.log | wc -l)" "3"
+assert_eq "turns.jsonl records failed attempts" "$(jq -r '[.attempt, .progressed, .commits] | @csv' .gsd-lite/logs/toy/turns.jsonl | paste -sd' ')" '1,false,0 2,false,0 3,false,0'
 assert_eq "exit hook code=2" "$(grep -c 'exit code=2' .gsd-lite/hooks.log)" "1"
 
 echo "== Test 3: スキル自身が BLOCKED を書いた場合 =="
@@ -147,6 +163,9 @@ out=$("$LOOP" --status)
 echo "$out" | grep -q "phase     : done" && ok "status shows phase" || ng "status phase"
 echo "$out" | grep -q "loop      : not running" && ok "status shows not running" || ng "status running state"
 echo "$out" | grep -q "subagents : auto" && ok "status shows subagents default" || ng "status subagents"
+echo "$out" | grep -q "token     : rotation off" && ok "status shows rotation off" || ng "status rotation off"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+grep -q "token     : rotation off" "$TESTROOT/check.log" && ok "check shows rotation off" || ng "check rotation off"
 
 echo "== Test 6: max_turns 事前判定と番兵の優先 =="
 make_project "$TESTROOT/p6"
@@ -187,6 +206,7 @@ case "$prompt" in
   '$gsd-lite-plan '*) cmd=/gsd-lite-plan ;;
   '$gsd-lite-impl '*) cmd=/gsd-lite-impl ;;
   '$gsd-lite-verify '*) cmd=/gsd-lite-verify ;;
+  '$gsd-lite-reflect '*) cmd=/gsd-lite-reflect ;;
   *) exit 92 ;;
 esac
 [ -f ".agents/skills/${cmd#/}/SKILL.md" ] || exit 93
@@ -215,7 +235,7 @@ echo "== Test 8: Codex フルサイクルとモデル設定 =="
 make_codex_project "$TESTROOT/codex project"
 GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
 assert_eq "Codex DONE" "$?" "0"
-assert_eq "Codex turns" "$(jq -r .turn .gsd-lite/state.json)" "5"
+assert_eq "Codex turns" "$(jq -r .turn .gsd-lite/state.json)" "6"
 for value in exec workspace-write 'approval_policy="never"' 'model_reasoning_effort="high"' codex-research-stub codex-plan-stub codex-impl-stub codex-verify-stub "$(git rev-parse --absolute-git-dir)"; do
   grep -Fxq -- "$value" .gsd-lite/stub-args.log && ok "Codex argv: $value" || ng "Codex argv: $value"
 done
@@ -322,7 +342,7 @@ for pattern in impl verify both reverse; do
   GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
   assert_eq "$pattern completes" "$?" "0"
   assert_eq "$pattern Codex turn count" "$(grep -c '^exec$' .gsd-lite/stub-args.log)" "$expected"
-  assert_eq "$pattern total turns" "$(jq -r .turn .gsd-lite/state.json)" "5"
+  assert_eq "$pattern total turns" "$(jq -r .turn .gsd-lite/state.json)" "6"
   for phase in research plan impl verify; do
     engine=$(jq -r --arg phase "$phase" '.phase_engines[$phase] // .engine' .gsd-lite/state.json)
     grep -Fq "[$engine/$phase]" "$TESTROOT/loop-out.log" && ok "$pattern routes $phase" || ng "$pattern routes $phase"
@@ -408,7 +428,7 @@ EOF
   assert_eq "$pause_engine stop flag not committed" "$(git status --porcelain | wc -l)" "0"
   GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/resume.log" 2>&1
   assert_eq "$pause_engine resumed to DONE" "$?" "0"
-  assert_eq "$pause_engine no repeated completed turn" "$(jq -r .turn .gsd-lite/state.json)" "5"
+  assert_eq "$pause_engine no repeated completed turn" "$(jq -r .turn .gsd-lite/state.json)" "6"
   [ ! -e .gsd-lite/logs/.stop ] && ok "$pause_engine resume clears flag" || ng "$pause_engine stale flag"
   assert_eq "$pause_engine first turn executed once" "$(grep -c 'ARGS:.*-p /gsd-lite-research' .gsd-lite/stub-args.log)" "1"
 done
@@ -524,6 +544,7 @@ case "$prompt" in
   'Load the skill named gsd-lite-plan '*) cmd=/gsd-lite-plan ;;
   'Load the skill named gsd-lite-impl '*) cmd=/gsd-lite-impl ;;
   'Load the skill named gsd-lite-verify '*) cmd=/gsd-lite-verify ;;
+  'Load the skill named gsd-lite-reflect '*) cmd=/gsd-lite-reflect ;;
   *) exit 92 ;;
 esac
 [ -f ".opencode/skills/${cmd#/}/SKILL.md" ] || exit 93
@@ -547,7 +568,7 @@ echo "== Test 23: OpenCode フルサイクルとモデル設定 =="
 make_opencode_project "$TESTROOT/opencode project"
 GSD_LITE_OPENCODE_BIN="$TESTROOT/bin/opencode-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
 assert_eq "OpenCode DONE" "$?" "0"
-assert_eq "OpenCode turns" "$(jq -r .turn .gsd-lite/state.json)" "5"
+assert_eq "OpenCode turns" "$(jq -r .turn .gsd-lite/state.json)" "6"
 for value in run --dangerously-skip-permissions oc/research-stub oc/plan-stub oc/impl-stub oc/verify-stub --variant high --agent build; do
   grep -Fxq -- "$value" .gsd-lite/stub-args.log && ok "OpenCode argv: $value" || ng "OpenCode argv: $value"
 done
@@ -601,7 +622,7 @@ install_root="$TESTROOT/oc install"
 GSD_LITE_INSTALL_ROOT="$install_root" "$REPO_DIR/install.sh" --engine opencode > "$TESTROOT/install.log" 2>&1
 assert_eq "OpenCode install succeeded" "$?" "0"
 [ -f "$install_root/.config/opencode/skills/gsd-lite-init/SKILL.md" ] && ok "OpenCode init installed" || ng "OpenCode init missing"
-[ -f "$install_root/.config/opencode/commands/gsd-lite-init.md" ] && [ -f "$install_root/.config/opencode/commands/gsd-lite-discuss.md" ] && ok "OpenCode commands installed" || ng "OpenCode commands missing"
+[ -f "$install_root/.config/opencode/commands/gsd-lite-init.md" ] && [ -f "$install_root/.config/opencode/commands/gsd-lite-discuss.md" ] && [ -f "$install_root/.config/opencode/commands/gsd-lite-reflect.md" ] && ok "OpenCode commands installed" || ng "OpenCode commands missing"
 [ ! -e "$install_root/.claude" ] && [ ! -e "$install_root/.codex" ] && ok "OpenCode-only install" || ng "other engine directories created"
 [ ! -e "$install_root/.config/opencode/gsd-lite/templates/settings.allowlist.json" ] && ok "no Claude allowlist in OpenCode" || ng "Claude allowlist copied"
 assert_eq "OpenCode template engine" "$(jq -r .engine "$install_root/.config/opencode/gsd-lite/templates/state.json")" "opencode"
@@ -622,7 +643,7 @@ echo "$out" | grep -q 'phase     : done' && ok "watch shows status" || ng "watch
 echo "$out" | grep -q -- '-- tasks --' && ok "watch shows task section" || ng "watch tasks section"
 echo "$out" | grep -q -- '- \[ \] current task' && ok "watch lists unchecked task" || ng "watch unchecked task"
 echo "$out" | grep -q -- '- \[x\] done task' && ok "watch lists done task" || ng "watch done task"
-echo "$out" | grep -q -- '-- log: toy/turn-005-attempt1.log (last 3 lines) --' && ok "watch names latest log" || ng "watch log header"
+echo "$out" | grep -q -- '-- log: toy/turn-006-attempt1.log (last 3 lines) --' && ok "watch names latest log" || ng "watch log header"
 echo "$out" | grep -q 'hello from the turn' && ok "watch tails the log" || ng "watch log tail"
 echo "$out" | grep -q 'route     : impl -> claude (model: sonnet-stub)' && ok "watch shows route models" || ng "watch route"
 assert_eq "watch-once touches nothing" "$(git status --porcelain | grep -v PLAN.md | wc -l)" "0"
@@ -647,13 +668,15 @@ make_project "$TESTROOT/t27"
 TOK_A=secret-aaa TOK_B=secret-bbb TOK_C=secret-ccc GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B TOK_C" \
   GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-token" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
 assert_eq "rotation cycle DONE" "$?" "0"
-assert_eq "tokens rotate per turn" "$(paste -sd, .gsd-lite/token-seen.log)" "secret-aaa,secret-bbb,secret-ccc,secret-aaa,secret-bbb"
-assert_eq "turn lines name the variable" "$(grep -c '(token: TOK_' "$TESTROOT/loop-out.log")" "5"
+assert_eq "tokens rotate per turn" "$(paste -sd, .gsd-lite/token-seen.log)" "secret-aaa,secret-bbb,secret-ccc,secret-aaa,secret-bbb,secret-ccc"
+assert_eq "turn lines name the variable" "$(grep -c '(token: TOK_' "$TESTROOT/loop-out.log")" "6"
+assert_eq "turns.jsonl names the token variable" "$(jq -r .token_var .gsd-lite/logs/toy/turns.jsonl | paste -sd,)" "TOK_A,TOK_B,TOK_C,TOK_A,TOK_B,TOK_C"
+grep -q 'secret-' .gsd-lite/logs/toy/turns.jsonl && ng "token value leaked to turns.jsonl" || ok "turns.jsonl has no token values"
 grep -q 'secret-' "$TESTROOT/loop-out.log" && ng "token value leaked to loop output" || ok "token values never printed"
-assert_eq "rotation index kept in logs/" "$(cat .gsd-lite/logs/.token_index)" "2"
+assert_eq "rotation index kept in logs/" "$(cat .gsd-lite/logs/.token_index)" "0"
 assert_eq "rotation index not committed" "$(git status --porcelain | wc -l)" "0"
 out=$(TOK_A=x TOK_B=y TOK_C=z GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B TOK_C" "$LOOP" --status)
-echo "$out" | grep -q 'token     : rotating 3 vars (next: TOK_C)' && ok "status shows next token var" || ng "status token line"
+echo "$out" | grep -q 'token     : rotating 3 vars (next: TOK_A)' && ok "status shows next token var" || ng "status token line"
 out=$(GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_MISSING" "$LOOP" --status)
 assert_eq "status survives an unset token var" "$?" "0"
 echo "$out" | grep -q 'token     : rotating 2 vars (next: TOK_A)' && ok "status shows rotation without validating" || ng "status with unset var"
@@ -661,6 +684,8 @@ make_project "$TESTROOT/t27b"
 TOK_A=secret-aaa GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_MISSING" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
 assert_eq "unset token variable fails --check" "$?" "6"
 grep -q 'TOK_MISSING' "$TESTROOT/check.log" && ok "check names the missing variable" || ng "missing variable message"
+TOK_A=secret-aaa TOK_B=secret-bbb GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+grep -q "token     : rotating 2 vars (next: TOK_A)" "$TESTROOT/check.log" && ok "check shows rotation on" || ng "check rotation on"
 GSD_LITE_CLAUDE_TOKEN_VARS="bad-name" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
 assert_eq "invalid variable name rejected" "$?" "6"
 TOK_A=secret-aaa GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_MISSING" GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-token" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
@@ -671,6 +696,23 @@ assert_eq "without the option the parent token passes through" "$(sort -u .gsd-l
 make_codex_project "$TESTROOT/t27c"
 GSD_LITE_CLAUDE_TOKEN_VARS="TOK_MISSING" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
 assert_eq "codex-only project ignores Claude token vars" "$?" "0"
+
+echo "== Test 28: reflect: false は従来のフローで、reflect スキルも要求しない =="
+make_project "$TESTROOT/r28"
+rm -r .claude/skills/gsd-lite-reflect
+commit_state '.reflect=false'
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "reflect:false passes --check without the reflect skill" "$?" "0"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "reflect:false DONE" "$?" "0"
+assert_eq "reflect:false skips the reflect turn" "$(jq -r .turn .gsd-lite/state.json)" "5"
+grep -q 'reflect' "$TESTROOT/loop-out.log" && ng "reflect turn ran with reflect:false" || ok "no reflect turn with reflect:false"
+make_project "$TESTROOT/r28b"
+rm -r .claude/skills/gsd-lite-reflect
+git add -A && git commit -qm "drop reflect skill"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "reflect enabled requires the reflect skill" "$?" "6"
+grep -q 'gsd-lite-reflect/SKILL.md' "$TESTROOT/check.log" && ok "check names the reflect skill" || ng "reflect skill message"
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

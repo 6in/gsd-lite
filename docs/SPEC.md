@@ -13,6 +13,12 @@
 > 終了コード7で一時中断する。通常起動は排他取得後にフラグを削除して保存状態から再開する。
 > DONE / BLOCKED を優先し、未コミットstateの復元・リトライ回数の保持は従来と同じ。
 > 状態遷移・コミットによる進捗判定・終了コードは両エンジン共通。
+> 振り返り追補: verify 合格（マージ / MR 作成後）に `reflect` フェーズを 1 ターン挟み
+> （`state.reflect`、既定 `true`）、記録（固定項目化した PROGRESS.md / ループが記録する
+> `logs/<milestone>/turns.jsonl` / git log / PLAN / VERIFICATION）だけを根拠に PMI 形式の振り返りを
+> `.gsd-lite/reflect/<日時>-<slug>.md` に書いてから DONE。plan / discuss は直近の「次回への提案」を読む。
+> `/gsd-lite-reflect` の手動呼び出し（state 不変）と、同一ブランチで MR 指摘を直す修正ラウンド
+> （`state.fix_round`、plan は `F<N>-k` を追記、verify は既存 MR へ push のみ）も追加。
 > サブエージェント追補: `state.subagents`（`auto` / `off`、既定 `auto`）で、impl は plan が
 > 各タスクに書いた「並列サブ作業」（対象ファイルが重ならない単位）をサブエージェントで並行実装し、
 > verify はレビューとセキュリティチェックを並列化する。サブエージェントはコミット・state・PLAN・
@@ -566,7 +572,7 @@ claude
 > /gsd-lite-init
 ```
 
-→ `.claude/skills/`（discuss〜verify の 5 スキル）と allowlist、`.gsd-lite/` の足場が
+→ `.claude/skills/`（discuss〜reflect の 6 スキル）と allowlist、`.gsd-lite/` の足場が
 生成され、ベースブランチにコミットされる。
 
 ### 2. 仕様詰め（マイルストーンごと・対話）

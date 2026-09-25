@@ -2,7 +2,8 @@
 
 gsd-core のライト版。**対話で仕様を詰め切ったら、あとは無人ループが
 research → plan → impl → verify → 仕上げ（ローカルのみなら自動マージ /
-リモートありなら push + MR/PR 作成）まで進める**最小構成の自律開発ランナー。
+リモートありなら push + MR/PR 作成）→ reflect（記録に基づく PMI の振り返り）まで
+進める**最小構成の自律開発ランナー。
 
 - 毎ターン Claude Code (`claude -p`)、Codex (`codex exec`)、OpenCode (`opencode run`) のいずれかで新規コンテキスト起動。継続性は `.gsd-lite/` + git のみ
 - ループ（`gsd-lite-loop.sh`）はダム: `state.json` の `next_command` を実行するだけ
@@ -211,6 +212,8 @@ gsd-lite-loop.sh --status     # route 行で各フェーズのエンジンとモ
 | エンジン | モデル | 推論強度など | 値の形式 |
 |---|---|---|---|
 | Claude Code | `model.<phase>` | （なし） | `claude -p --model` に渡す名前。例 `claude-opus-5`、`claude-fable-5-1` |
+
+`<phase>` は `research` / `plan` / `impl` / `verify` / `reflect`。
 | Codex | `codex.model.<phase>` | `codex.reasoning_effort.<phase>`（`low` / `medium` / `high` / `xhigh` など） | `codex exec --model` に渡す名前。例 `gpt-5.5` |
 | OpenCode | `opencode.model.<phase>` | `opencode.variant.<phase>`、`opencode.agent.<phase>` | `provider/model`。例 `anthropic/claude-opus-5`（`opencode models` で一覧） |
 
@@ -296,6 +299,56 @@ Claude Code の Agent ツールや OpenCode の task ツールのように、実
 値は discuss の実行パターン選択で聞かれるほか、ループ停止中に `.gsd-lite/state.json` の
 `subagents` を編集してコミットしても変えられる。`--status` / `--watch` の `subagents` 行で確認できる。
 
+## 振り返り（reflect）と修正ラウンド
+
+verify 合格でマージまたは MR/PR 作成が済んだ後、**reflect フェーズ**が 1 ターン走り、
+`.gsd-lite/reflect/<YYYYMMDD-HHMM>-<slug>.md` に PMI 形式（Plus / Minus / Interesting +
+次回への提案）の振り返りを書いてコミットしてから DONE になる。state の `reflect` を
+`false` にすると従来通り verify から直接 DONE になる（古い state にキーがなければ `true` 扱い）。
+
+### 何を根拠に振り返るか
+
+各ターンは新規コンテキストなので、reflect は作業の記憶を持たない。**記録だけ**を根拠にし、
+根拠（ターン番号 / コミット / ファイル）を必ず添える。推測は「推測:」と明記し、記録にないことは
+書かない。そのために記録を 2 つ強化している。
+
+- **PROGRESS.md の申し送りは固定項目**（全フェーズ共通）: `やったこと / 想定外 / やり直し /
+  次への注意`。各ターンが自分の小さな振り返りを残し、reflect がそれを集約する
+- **`.gsd-lite/logs/<milestone>/turns.jsonl`**: ループが 1 試行ごとに phase / engine / model /
+  attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 / 増えたコミット数を 1 行ずつ追記する
+  （トークン不要の客観データ。トークン切り替え時は変数名も記録するが値は書かない）。
+  例: フェーズ別の集計
+
+  ```bash
+  jq -s 'group_by(.phase) | map({phase: .[0].phase, attempts: length, sec: (map(.duration_s)|add), retries: (map(select(.attempt>1))|length)})' .gsd-lite/logs/<milestone>/turns.jsonl
+  ```
+
+ほかに git log / diff、PLAN.md（計画タスク数と実ターン数の差）、VERIFICATION.md、
+BLOCKED.md の履歴、REQUIREMENTS / DECISIONS / RESEARCH、既存の振り返りを読む。
+
+### 振り返りを次に活かす
+
+plan と discuss は `.gsd-lite/reflect/` の直近 2 件の「次回への提案」を読んでから作業し、
+反映した / しない提案を PLAN.md のメモや DECISIONS.md に残す。reflect 自身も
+「前回の提案が守られたか」を毎回確認する。`reflect/` は archive に移さず蓄積する。
+
+### 手動の振り返り
+
+MR/PR 作成後に手で修正した場合など、任意のタイミングで `/gsd-lite-reflect`
+（Codex は `$gsd-lite-reflect`、OpenCode は同名コマンド）を対話で呼べる。
+前回の振り返り以降のコミットを対象に追加の振り返りを書き、ファイルと PROGRESS.md だけを
+コミットする。state の phase / turn には触らない。
+
+### 修正ラウンド（MR の指摘をループで直す）
+
+MR/PR の指摘対応をループで回すには、マイルストーンブランチにいる状態で
+`/gsd-lite-discuss <指摘内容>` を実行し、0-a の選択で「修正ラウンド」を選ぶ。
+
+- 同じブランチに留まり、REQUIREMENTS.md / DECISIONS.md に「修正ラウンド N」の節を追記する
+- state は `fix_round: N` / `phase: "plan"` から再開（調査が必要なら research から）
+- plan は修正タスクを `F<N>-k` として PLAN.md 末尾に追記、impl が実装、verify は既存 MR/PR に
+  push だけ行い、reflect が修正ラウンドの振り返り（なぜ最初の verify で見つからなかったか）を残す
+
 ## ループ開始前に実行パターンを選ぶ
 
 discuss の最後に、実行パターンを選んでからループを開始する。
@@ -326,7 +379,7 @@ discuss の最後に、実行パターンを選んでからループを開始す
 
 優先順位は `GSD_LITE_ENGINE` → `phase_engines.<phase>` → `engine` → `claude`。
 プリセット変更時は `phase_engines` を置き換えるため、前回の割り当ては残らない。
-指定できるフェーズは `research` / `plan` / `impl` / `verify`。
+指定できるフェーズは `research` / `plan` / `impl` / `verify` / `reflect`。
 
 混在させる場合は `install.sh --engine all` で全エンジンのテンプレートを導入する。
 discuss が選択したエンジン用のプロジェクトスキルを配置する

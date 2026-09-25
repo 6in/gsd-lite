@@ -5,6 +5,8 @@
   "codex": { "model": {}, "reasoning_effort": {} },
   "opencode": { "model": {}, "variant": {}, "agent": {} },
   "subagents": "auto",
+  "reflect": true,
+  "fix_round": 0,
   "milestone": "",
   "phase": "discuss",
   "next_command": "DISCUSS",
@@ -22,7 +24,8 @@
     "research": "claude-fable-5-1",
     "plan": "claude-fable-5-1",
     "impl": "claude-opus-5",
-    "verify": "claude-fable-5-1"
+    "verify": "claude-fable-5-1",
+    "reflect": "claude-fable-5-1"
   },
   "updated_at": ""
 }

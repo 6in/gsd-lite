@@ -17,6 +17,14 @@ disable-model-invocation: true
      実際に検証しているか）/ 要件の取りこぼし
    - **セキュリティチェック**: 入力検証 / 認可 / 秘密情報のハードコード /
      インジェクション / 依存の危険な使い方
+   - **入力クラスの境界は一括で洗う**（同型の指摘をラウンドをまたいで小出しにしない）:
+     1 つの入力経路（引数 / 環境変数 / データファイル / 標準入力）に問題を見つけたら、
+     同じ経路の**クラス全体**を同じラウンドで試す。例: 制御文字なら C0 / DEL / C1 /
+     孤立サロゲート / 書式文字（U+2028 等）をまとめて、例外漏れなら `RecursionError` /
+     `UnicodeError` / `ValueError` / `OSError` / 巨大入力をまとめて。修正タスクの完了基準も
+     「C0 を拒否する」ではなく「制御文字クラス全体を拒否し、どの入力でもトレースバックを
+     出さない」のようにクラス単位で書く。ラウンド 2 以降で前ラウンドと同型の指摘を出す場合は、
+     VERIFICATION.md に「なぜ前ラウンドで拾えなかったか」を 1 行書く
    - PLAN.md の検証コマンドでテストがすべて green なことも再確認する
    - **並列レビュー**（任意）: `state.json` の `subagents` が `auto`（未指定も `auto`）で
      実行エンジンがサブエージェントを使える場合、「コードレビュー」と「セキュリティチェック」を
@@ -33,9 +41,12 @@ disable-model-invocation: true
    - `git checkout <branch.base>` → `git merge --no-ff gsd-lite/<slug>`
    - 衝突したら `git merge --abort` → `git checkout gsd-lite/<slug>` でブランチに戻り、
      衝突内容を BLOCKED.md に書いて BLOCKED にする（人間が解決）
-   - マージ成功: ブランチは削除せず残す。`phase: "done"` / `next_command: "DONE"`
+   - マージ成功: ブランチは削除せず残す。**完了遷移**（下記）へ
 
    **(b) リモートあり → push + MR/PR 作成（ローカルマージはしない）**
+   - **修正ラウンド**（state の `fix_round` ≥ 1）で MR/PR が既にある場合は、新規作成せず
+     `git push origin gsd-lite/<slug>` だけ行う（既存 MR/PR に修正コミットが載る）。
+     MR/PR の URL は前回の VERIFICATION.md / PROGRESS.md から引き継いで記録する
    - origin の URL からホストを判別し、ホスト別の手順で作成する:
      - **github.com**: `git push -u origin gsd-lite/<slug>` →
        `gh pr create --base <branch.base> --title "<milestone の要約>" --body "..."`
@@ -50,7 +61,7 @@ disable-model-invocation: true
    - MR/PR の本文には受け入れ基準の達成状況と VERIFICATION.md の要約を書き、
      末尾に実際の実行エンジン名（Claude Code / Codex / OpenCode）を記載する
    - 作成成功: MR/PR の URL を VERIFICATION.md と PROGRESS.md に記録。
-     ブランチはそのまま。`phase: "done"` / `next_command: "DONE"`（マージは人間 / CI）
+     ブランチはそのまま。**完了遷移**（下記）へ（マージは人間 / CI）
    - **push の成否を必ず確認する**（MR 用 push・最終 state コミット後の再 push とも）。
      失敗したら 1 回だけリトライし、それでも失敗なら DONE のまま終わらせず、
      `next_command: "BLOCKED"` / `phase: "blocked"` に更新して失敗内容を BLOCKED.md に
@@ -59,6 +70,12 @@ disable-model-invocation: true
    - push はできたが MR/PR 作成に失敗（CLI 不在・未認証・ホスト不明など）:
      push 済みであることと失敗理由・手動作成の手順を BLOCKED.md に書いて BLOCKED にする
    - push 自体が失敗: 理由を BLOCKED.md に書いて BLOCKED にする
+
+   **完了遷移（(a)(b) 共通）**
+   - state の `reflect` が `false` でなければ（未指定は `true`）`phase: "reflect"` /
+     `next_command: "/gsd-lite-reflect"` にする。次のターンが記録に基づく振り返りを
+     `.gsd-lite/reflect/` に書いてから DONE にする
+   - `reflect: false` なら従来通り `phase: "done"` / `next_command: "DONE"`
 
    **指摘ありの場合**
    - 修正タスクを `.gsd-lite/PLAN.md` の Tasks 末尾に `- [ ] F1: ...` 形式で追記
@@ -70,7 +87,17 @@ disable-model-invocation: true
 
 ## ターン終了の共通手順（必須・この順で）
 
-1. `.gsd-lite/PROGRESS.md` に 3〜5 行追記（判定 / 指摘数 / マージ・MR 結果）
+1. `.gsd-lite/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
+   やり直しは正直に書く。なければ「なし」「0 回」と書く。`<N>` は**このターンで +1 した後の
+   `state.turn`**（= ループが `turn N [...]` と表示する番号、research が turn 1）。
+   やり直しの原因が次のターンでも起こり得るなら、**同じ内容を「次への注意」にも書く**）:
+   ```markdown
+   ## turn <N> — verify — <判定 / 指摘数 / マージ・MR 結果>
+   - やったこと: <1〜2 行>
+   - 想定外: なし | <想定と違ったこと、ハマったこと>
+   - やり直し: 0 回 | <N 回（何を・なぜ）>
+   - 次への注意: <次のターンへの申し送り>
+   ```
 2. `state.json` を更新: `next_command` と `phase` を上記のとおり、`turn` を +1、
    `updated_at` を現在時刻（ISO 8601）に。**turn の +1 を忘れるとループが
    リトライ扱いにするので必ず行う**

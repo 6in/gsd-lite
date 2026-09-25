@@ -3,7 +3,7 @@
 #  - bin/gsd-lite-loop.sh  → ~/.local/bin/
 #  - skills/gsd-lite-init  → ~/.claude/skills/（Codex: ~/.agents/skills/、OpenCode: ~/.config/opencode/skills/）
 #  - templates/            → ~/.claude/gsd-lite/templates/（Codex: ~/.codex/gsd-lite/、OpenCode: ~/.config/opencode/gsd-lite/）
-#  - opencode/commands/    → ~/.config/opencode/commands/（OpenCode の /gsd-lite-init, /gsd-lite-discuss）
+#  - opencode/commands/    → ~/.config/opencode/commands/（OpenCode の /gsd-lite-init, /gsd-lite-discuss, /gsd-lite-reflect）
 set -eu
 
 REPO_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -54,7 +54,7 @@ install_engine() {
     # OpenCode はスキルを / コマンドで呼べないので、スキルを読み込む薄いコマンドを置く
     install -d "$INSTALL_ROOT/.config/opencode/commands"
     cp "$REPO_DIR"/opencode/commands/gsd-lite-*.md "$INSTALL_ROOT/.config/opencode/commands/"
-    echo "  $engine commands  : $INSTALL_ROOT/.config/opencode/commands/gsd-lite-{init,discuss}.md"
+    echo "  $engine commands  : $INSTALL_ROOT/.config/opencode/commands/gsd-lite-{init,discuss,reflect}.md"
   fi
 }
 

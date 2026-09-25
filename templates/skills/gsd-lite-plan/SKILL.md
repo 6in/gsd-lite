@@ -12,8 +12,13 @@ disable-model-invocation: true
 ## 手順
 
 1. `.gsd-lite/REQUIREMENTS.md` / `DECISIONS.md` / `RESEARCH.md` とコードベースを読む。
-   `state.json` の `subagents`（`auto` / `off`、未指定は `auto`）も確認する
-2. `.gsd-lite/PLAN.template.md` の形式で `.gsd-lite/PLAN.md` を作成する:
+   `state.json` の `subagents`（`auto` / `off`、未指定は `auto`）と `fix_round` も確認する。
+   **`.gsd-lite/reflect/` に振り返りがあれば直近 2 件の「次回への提案」を読み**、
+   計画に反映する（反映した / しない提案と理由を PLAN.md の「メモ」に書く）
+2. `.gsd-lite/PLAN.template.md` の形式で `.gsd-lite/PLAN.md` を作成する
+   （**修正ラウンド**（`fix_round` ≥ 1）では作り直さず、REQUIREMENTS.md の
+   「修正ラウンド N」の指摘に対応するタスクを `F<round>-1`, `F<round>-2` ... として
+   Tasks 末尾に追記するだけ。既存の完了タスクは触らない）:
    - **タスク粒度の品質基準**: 各タスクは「1 ターン（新規コンテキスト 1 回）で
      実装+テスト+コミットまで完結する」大きさを上限とする。手順は 2 段階: ①まず細かく分割して
      洗い出す（受け入れ基準からの漏れを防ぐ）→ ②1 ターンで完結する範囲で同種・同ファイル群を統合する。
@@ -39,7 +44,17 @@ disable-model-invocation: true
 
 ## ターン終了の共通手順（必須・この順で）
 
-1. `.gsd-lite/PROGRESS.md` に 3〜5 行追記（やったこと / 次 / 注意点）
+1. `.gsd-lite/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
+   やり直しは正直に書く。なければ「なし」「0 回」と書く。`<N>` は**このターンで +1 した後の
+   `state.turn`**（= ループが `turn N [...]` と表示する番号、research が turn 1）。
+   やり直しの原因が次のターンでも起こり得るなら、**同じ内容を「次への注意」にも書く**）:
+   ```markdown
+   ## turn <N> — plan — <タスク数と要約>
+   - やったこと: <1〜2 行>
+   - 想定外: なし | <想定と違ったこと、ハマったこと>
+   - やり直し: 0 回 | <N 回（何を・なぜ）>
+   - 次への注意: <次のターンへの申し送り>
+   ```
 2. `state.json` を更新: `next_command` と `phase` を上記のとおり、`turn` を +1、
    `updated_at` を現在時刻（ISO 8601）に。**turn の +1 を忘れるとループが
    リトライ扱いにするので必ず行う**

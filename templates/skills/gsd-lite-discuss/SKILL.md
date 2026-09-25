@@ -7,7 +7,7 @@ disable-model-invocation: true
 # gsd-lite-discuss — 仕様を詰め切る（grilling × AskUserQuestion）
 
 マイルストーンの仕様をユーザーと詰め切る対話フェーズ。ここが人間の判断を注入する
-唯一の定常ポイントであり、以降の無人ループ（research → plan → impl → verify）の
+唯一の定常ポイントであり、以降の無人ループ（research → plan → impl → verify → reflect）の
 品質はこのフェーズの網羅性で決まる。
 
 引数があればそれがマイルストーンの初期要望。なければまず要望を聞く。
@@ -27,7 +27,7 @@ disable-model-invocation: true
   推論強度は `opencode.variant.<phase>`、エージェントは `opencode.agent.<phase>`。
   空ならその CLI の設定を使用する。
 - 次のマイルストーンに移るときも `engine` / `phase_engines` / `model` / `codex` / `opencode` /
-  `subagents` は保持する。
+  `subagents` / `reflect` は保持する。
 - 監視用サブエージェントが利用できない場合は `gsd-lite-loop.sh --status` で
   確認する方法を案内する。
 
@@ -41,16 +41,30 @@ disable-model-invocation: true
 `done` または初期状態のときだけ 0-a へ進む。
 
 **0-a. ブランチ整理（archive より先に行う）**: いま前回の作業ブランチ（`gsd-lite/*`）に
-いる場合（前回がリモート運用で MR 待ちのケース）は、state の `branch.base` へ
-`git checkout` で戻る。リモート（origin）があれば `git pull --ff-only origin <base>` で
-base を最新化する。**前回マイルストーンの MR が未マージ**（pull しても前回の成果が
-base に含まれない）場合は、AUQ で「マージを待つ / 前回成果を含まない base のまま
-進める」を確認する。
+いる場合（前回がリモート運用で MR 待ちのケース）は、まず AUQ で次を選んでもらう:
 
-**0-b. 退避**: （base に移った後の）`.gsd-lite/state.json` の `phase` が `done` なら、
-`.gsd-lite/` 直下の成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN / PROGRESS /
-VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、state.json を
-テンプレート初期値で作り直してから始める。`phase` が `discuss` 以外で done でもない
+- **前回 MR の指摘を修正する（修正ラウンド）**: 要望が前回マイルストーンの MR/PR レビュー
+  対応や手直しなら、`gsd-lite/<slug>` に**留まり**、archive も state の作り直しもしない。
+  `.gsd-lite/reflect/` の直近の振り返りがあれば読む。REQUIREMENTS.md と DECISIONS.md に
+  「## 修正ラウンド N」（N = `fix_round` + 1）の節を追記し、指摘内容・対応方針・受け入れ基準を
+  そこに書く（以降の 1〜3 の議論はこの節が対象）。手順 5 では**ブランチを作らず**、
+  state を `fix_round: N` / `phase: "plan"` / `next_command: "/gsd-lite-plan"`
+  （調査が必要なら research から）/ `verify_round: 0` にしてコミットする。plan は修正タスクを
+  `F<N>-k` として末尾に追記し、verify は既存 MR/PR に push だけ行い、reflect が
+  修正ラウンドの振り返りを残す
+- **新しいマイルストーンを始める**: state の `branch.base` へ `git checkout` で戻る。
+  リモート（origin）があれば `git pull --ff-only origin <base>` で base を最新化する。
+  **前回マイルストーンの MR が未マージ**（pull しても前回の成果が base に含まれない）場合は、
+  AUQ で「マージを待つ / 前回成果を含まない base のまま進める」を確認する
+
+手動で直した後に振り返りだけ残したい場合は `/gsd-lite-reflect` を案内する（state は変えない）。
+
+**0-b. 退避**（修正ラウンドでは行わない）: （base に移った後の）`.gsd-lite/state.json` の
+`phase` が `done` なら、`.gsd-lite/` 直下の成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN /
+PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、state.json を
+テンプレート初期値で作り直してから始める（`.gsd-lite/reflect/` は移動せず蓄積する。
+新しいマイルストーンの要望を聞く前に直近 2 件の「次回への提案」を読み、discuss で
+確認すべき項目があれば初期フロンティアに加える）。`phase` が `discuss` 以外で done でもない
 場合は進行中のマイルストーンがあるので、ユーザーに状況を確認する（勝手に上書きしない）。
 
 ## 1. プロトコル: デザインツリーとフロンティア
@@ -133,10 +147,14 @@ VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、
        レビューとセキュリティチェックを並列化する。ターンあたりのトークン消費は増える。
        対応していないエンジン（Codex exec 等）のフェーズでは自動的に従来動作になる
      - `off`: 従来通り 1 エージェントが順に実装・検証する（コスト重視・小規模向け）
+   - **振り返り（reflect）**: state の `reflect`（既定 `true`）を確認する。`true` なら verify 合格後に
+     reflect ターンが記録に基づく PMI の振り返りを `.gsd-lite/reflect/` に書いてから DONE になる。
+     不要なら `false`（AUQ で聞くのは初回か変更希望があるときだけ）
    - **選択したエンジンの準備**: 現在のホストのインストール済みテンプレートを使い、
      Claude が含まれれば `.claude/skills/`、Codex が含まれれば `.agents/skills/`、
      OpenCode が含まれれば `.opencode/skills/` に
-     5 スキルを配置する。既存スキルに独自変更があれば無断で上書きせず確認する。
+     6 スキル（research / plan / impl / verify / reflect / discuss）を配置する。
+     既存スキルに独自変更があれば無断で上書きせず確認する。
      Claude が含まれる場合は Claude 用 init の allowlist マージ手順も行う。
      テンプレートがなければ `install.sh --engine all` を案内して準備完了まで待つ。
      Codex / OpenCode ホストのテンプレートに allowlist がない場合は
@@ -156,10 +174,16 @@ VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、
 5. **マイルストーンブランチ作成**（base の整理は手順 0-a で済んでいる前提）:
    - discuss で作成した要件・設定・スキル以外の未コミット変更を確認し、
      関係ない変更があれば扱いを相談する。今回生成したファイルは次のコミットに含める
-   - 現在のブランチ（= base）名を控え、`git checkout -b gsd-lite/<slug>`
+   - 現在のブランチ（= base）名を控え、**base にコミットが存在することを確認する**
+     （`git rev-parse --verify HEAD >/dev/null 2>&1`）。unborn（初回コミット前）なら、
+     ブランチを切る前に `.gsd-lite/` の足場と REQUIREMENTS / DECISIONS を base 上で
+     `gsd-lite: scaffold` としてコミットする（init がコミットし損ねたケース。base が無いと
+     verify が差分範囲を取れず、マージ先も存在しない）。そのうえで `git checkout -b gsd-lite/<slug>`
    - state.json を**すべて更新してから**コミットする: `milestone`（kebab-case の
      スラッグ）/ `branch`（name と base）/ `research.targets` / `phase: "research"` /
-     `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `subagents` / `updated_at`。
+     `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `subagents` / `reflect` /
+     `fix_round: 0` / `updated_at`（修正ラウンドは 0-a の記載どおり、ブランチを作らず
+     `fix_round` / `phase` / `next_command` / `verify_round` / `updated_at` を更新）。
      そのうえで REQUIREMENTS.md / DECISIONS.md / state.json と追加・更新したスキル・設定を一括コミット
      （`gsd-lite(discuss): <slug> 要件確定`）。
      **遷移（next_command）までコミットに含めるのが重要** — コミット後に state を
