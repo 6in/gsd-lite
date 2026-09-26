@@ -27,21 +27,53 @@ disable-model-invocation: true
   推論強度は `opencode.variant.<phase>`、エージェントは `opencode.agent.<phase>`。
   空ならその CLI の設定を使用する。
 - 次のマイルストーンに移るときも `engine` / `phase_engines` / `model` / `codex` / `opencode` /
-  `subagents` / `reflect` は保持する。
+  `subagents` / `reflect` は保持する（gsd-control 形では `.gsd-lite/config.json` の `defaults` が
+  次のマイルストーンの初期値。選んだパターンを次回以降の既定にしたいときは `defaults` も更新してコミットする）。
 - 監視用サブエージェントが利用できない場合は `gsd-lite-loop.sh --status` で
   確認する方法を案内する。
+
+## 作業場所の判定（最初に 1 回）
+
+| 状況 | 形 | `$MS`（state と成果物） | `$TARGET`（コードを書くリポジトリ） |
+|---|---|---|---|
+| `.gsd-lite/state.json` がある | **in-repo**（従来） | `.gsd-lite` | `.`（今いるリポジトリ） |
+| なくて `.gsd-lite/config.json` がある | **gsd-control**（制御リポジトリ） | `.gsd-lite/milestones/<slug>` | `work/<name>`（config.json の `targets`） |
+| どちらもない | 未セットアップ | `/gsd-lite-init` を案内して終了 | |
+
+in-repo 形では以下の「gsd-control 形」の注記を無視し、従来どおり進める。gsd-control 形では:
+
+- **今いる制御ブランチが `gsd-lite/<slug>`** なら、そのマイルストーン（`$MS/state.json`）が 0-0 / 0-a の対象。
+  それ以外（main 等）にいるなら新しいマイルストーンを始める（進行中のものはない）
+- **対象の選択**: `config.json` の `targets` から選ぶ（1 つなら確認だけ、複数なら AUQ。未登録なら
+  `/gsd-lite-init` で追加してもらう）。`TARGET=work/<name>`、対象 base は `targets.<name>.base`
+- **対象の準備**: `[ -d $TARGET/.git ] || git clone <targets.<name>.url> $TARGET`。
+  `git -C $TARGET checkout <base>`、リモートがあれば `git -C $TARGET pull --ff-only origin <base>`。
+  対象の作業ツリーが dirty なら扱いを相談する
+- **対象の規約を読む**: `$TARGET/CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、
+  要望を聞く前に読み、既存コードとの整合の質問に活かす（plan / impl も同じファイルを読む）
+- **slug を早く決める**: 要望を聞いたら最初の AUQ で kebab-case の slug を確認し、
+  `git checkout -b gsd-lite/<slug>`（制御側。いまいたブランチが制御側の base）と `mkdir -p $MS` を
+  作ってから議論を始める（4 のインライン文書化の書き先が必要なため）。
+  state は `jq -s '.[0] * .[1].defaults' <テンプレート>/state.json .gsd-lite/config.json > $MS/state.json`
+  で作り、`target: {name: "<name>", path: "work/<name>"}` を入れる（テンプレートはホスト用の
+  `~/.claude/gsd-lite/templates/` 等。init と同じ場所）
+- **0-b の退避は行わない**（マイルストーンごとにディレクトリが分かれている）。`.gsd-lite/reflect/` の
+  直近 2 件の「次回への提案」は同様に読む
+- 完了後の制御側ブランチ（`gsd-lite/<slug>`）の扱いは人間が選ぶ（制御 main にマージ / reflect だけ
+  取り込む / 放置）。discuss は触らない
 
 ## 0. 進行中チェック → ブランチ整理 → 退避（この順で）
 
 **0-0. 進行中チェック（ブランチを動かす前に最初に行う）**: 現在の
-`.gsd-lite/state.json` を読む。`phase` が `done` / `discuss` 以外
+`$MS/state.json` を読む（gsd-control 形で制御ブランチにいなければ進行中はなく、0-a も飛ばして 1 へ）。`phase` が `done` / `discuss` 以外
 （research / plan / impl / verify / blocked）なら**進行中のマイルストーンがある**。
 ブランチの切り替えも退避もせず、ユーザーに状況を確認して指示を仰ぐ
 （checkout してから確認すると、移動先の古い state を見て進行中を見逃す）。
 `done` または初期状態のときだけ 0-a へ進む。
 
 **0-a. ブランチ整理（archive より先に行う）**: いま前回の作業ブランチ（`gsd-lite/*`）に
-いる場合（前回がリモート運用で MR 待ちのケース）は、まず AUQ で次を選んでもらう:
+いる場合（前回がリモート運用で MR 待ちのケース。gsd-control 形では制御側と対象側の両方が
+`gsd-lite/<slug>` にいる）は、まず AUQ で次を選んでもらう:
 
 - **前回 MR の指摘を修正する（修正ラウンド）**: 要望が前回マイルストーンの MR/PR レビュー
   対応や手直しなら、`gsd-lite/<slug>` に**留まり**、archive も state の作り直しもしない。
@@ -53,13 +85,15 @@ disable-model-invocation: true
   `F<N>-k` として末尾に追記し、verify は既存 MR/PR に push だけ行い、reflect が
   修正ラウンドの振り返りを残す
 - **新しいマイルストーンを始める**: state の `branch.base` へ `git checkout` で戻る。
-  リモート（origin）があれば `git pull --ff-only origin <base>` で base を最新化する。
+  リモート（origin）があれば `git pull --ff-only origin <base>` で base を最新化する
+  （gsd-control 形: 対象側は `git -C $TARGET checkout <base>` と pull、制御側は制御側の base
+  ブランチ（通常 main）へ戻る。以降は「作業場所の判定」の新規マイルストーン手順へ）。
   **前回マイルストーンの MR が未マージ**（pull しても前回の成果が base に含まれない）場合は、
   AUQ で「マージを待つ / 前回成果を含まない base のまま進める」を確認する
 
 手動で直した後に振り返りだけ残したい場合は `/gsd-lite-reflect` を案内する（state は変えない）。
 
-**0-b. 退避**（修正ラウンドでは行わない）: （base に移った後の）`.gsd-lite/state.json` の
+**0-b. 退避**（修正ラウンドと gsd-control 形では行わない）: （base に移った後の）`.gsd-lite/state.json` の
 `phase` が `done` なら、`.gsd-lite/` 直下の成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN /
 PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ移動し、state.json を
 テンプレート初期値で作り直してから始める（`.gsd-lite/reflect/` は移動せず蓄積する。
@@ -101,8 +135,8 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
 
 決定が確定するたびに、ラウンドの合間に**その場で**反映する（最後にまとめて書かない）:
 
-- `.gsd-lite/REQUIREMENTS.md` — WHAT: 要求・受け入れ基準・スコープ外リスト・用語集
-- `.gsd-lite/DECISIONS.md` — WHY: 選んだ案 / 検討して却下した案とその理由
+- `$MS/REQUIREMENTS.md` — WHAT: 要求・受け入れ基準・スコープ外リスト・用語集
+- `$MS/DECISIONS.md` — WHY: 選んだ案 / 検討して却下した案とその理由
   （ユーザーが Other で答えた文脈も残す）
 
 用語の揺れに気づいたら、その場で正準の用語を確定して用語集に記録する。
@@ -172,6 +206,11 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
      環境変数で起動する場合は DECISIONS.md に記録して起動コマンドにも付ける。
 
 5. **マイルストーンブランチ作成**（base の整理は手順 0-a で済んでいる前提）:
+   - gsd-control 形: 制御側ブランチ `gsd-lite/<slug>` は「作業場所の判定」で作成済み。ここでは
+     **対象側**に `git -C $TARGET checkout -b gsd-lite/<slug>`（対象の base から。base にコミットが
+     あることを `git -C $TARGET rev-parse --verify HEAD` で確認）を作る。state の `branch` は
+     対象側のブランチ名と base。state・REQUIREMENTS / DECISIONS は制御側にコミットし、対象側には
+     何もコミットしない（以下の in-repo 向け手順のうちブランチ作成は対象側、コミットは制御側と読み替える）
    - discuss で作成した要件・設定・スキル以外の未コミット変更を確認し、
      関係ない変更があれば扱いを相談する。今回生成したファイルは次のコミットに含める
    - 現在のブランチ（= base）名を控え、**base にコミットが存在することを確認する**
@@ -180,7 +219,8 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
      `gsd-lite: scaffold` としてコミットする（init がコミットし損ねたケース。base が無いと
      verify が差分範囲を取れず、マージ先も存在しない）。そのうえで `git checkout -b gsd-lite/<slug>`
    - state.json を**すべて更新してから**コミットする: `milestone`（kebab-case の
-     スラッグ）/ `branch`（name と base）/ `research.targets` / `phase: "research"` /
+     スラッグ）/ `target`（`name` と `path`。in-repo 形は `{"name": "", "path": "."}` のままでよい）/
+     `branch`（name と base）/ `research.targets` / `phase: "research"` /
      `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `subagents` / `reflect` /
      `fix_round: 0` / `updated_at`（修正ラウンドは 0-a の記載どおり、ブランチを作らず
      `fix_round` / `phase` / `next_command` / `verify_round` / `updated_at` を更新）。
@@ -194,7 +234,7 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
      デタッチ起動し、`gsd-lite-loop.sh --status` などの監視コマンドを提示して
      **即座に手を離す**。以後このセッションでログをポーリングしない
    - **見守る**: バックグラウンドのサブエージェントを 1 体起動する。指示は
-     「.gsd-lite/state.json の phase の変化と loop.pid の消滅を Bash の
+     「$MS/state.json の phase の変化と loop.pid の消滅を Bash の
      until ループで待ち、変化のたびに 1 行（例: `research → plan (turn 3)`）、
      終了時に最終状態を報告して終わる。ログ全文は読まない。
      state の複数フィールドは 1 回の jq でまとめて読むこと

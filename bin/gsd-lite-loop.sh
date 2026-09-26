@@ -4,7 +4,7 @@
 # 仕様: docs/SPEC.md §7
 #
 # 使い方:
-#   gsd-lite-loop.sh            # ループ実行（対象プロジェクトの直下で）
+#   gsd-lite-loop.sh            # ループ実行（対象プロジェクトの直下で。gsd-control 形は制御リポジトリの直下・制御ブランチ gsd-lite/<slug> で）
 #   gsd-lite-loop.sh --check    # 全フェーズの実行前提を検証（起動・変更なし）
 #   gsd-lite-loop.sh --status   # 進捗の整形表示（トークンゼロの覗き窓）
 #   gsd-lite-loop.sh --stop     # 現在のターン終了後に中断を依頼
@@ -38,6 +38,15 @@
 # 計測: 各試行の phase / engine / model / attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 /
 # 増えたコミット数を logs/<milestone>/turns.jsonl に 1 行ずつ追記する（reflect フェーズの客観材料）。
 #
+# 作業場所（2 つの形。どちらも state.target.path が「コードを書く対象」を指す）:
+#   in-repo（従来）: .gsd-lite/state.json があるリポジトリ。target.path は "."（未指定も同じ）。
+#                   state・成果物・コードが同じ git に入る
+#   control（gsd-control）: .gsd-lite/config.json があり state.json がない制御リポジトリ。
+#                   マイルストーンは制御側ブランチ gsd-lite/<slug> で、state と成果物は
+#                   .gsd-lite/milestones/<slug>/ に、コードは target.path（work/<name>、gitignore 済み）
+#                   の対象リポジトリに入る。進捗判定は制御側のコミット済み state で行い、対象側の
+#                   ブランチ・マージ・push は各ターンのスキルが `git -C <target>` で行う
+#
 # 状態管理の原則: 信頼するのは「コミット済みの state」だけ。進捗判定は rc に依らず
 # HEAD の state で行い、各ターンの後に作業ツリーの state を HEAD へ正規化する
 # （「state は書いたがコミットしなかった」ターンを成功扱いしない）。ループ自身が
@@ -52,7 +61,12 @@ set -u
 
 GSD_DIR=".gsd-lite"
 PHASES="research plan impl verify reflect"   # ループが扱うフェーズ（スキル gsd-lite-<phase> に対応）
-STATE="$GSD_DIR/state.json"
+CONFIG="$GSD_DIR/config.json"      # 制御リポジトリの印（既定値 + 対象登録）。in-repo 形には無い
+MODE=repo                          # repo | control（resolve_state が決める）
+MS_DIR="$GSD_DIR"                  # マイルストーンディレクトリ（state.json と成果物の置き場）
+STATE="$MS_DIR/state.json"
+SLUG=""                            # control のときの制御ブランチ gsd-lite/<slug> の slug
+TARGET=.                           # コードを書く対象リポジトリ（state.target.path。"." は今いるリポジトリ）
 PIDFILE="$GSD_DIR/loop.pid"        # 情報表示用（排他は flock が担う）
 LOCKFILE="$GSD_DIR/logs/.lock"     # logs/ は gitignore 済み
 RETRYFILE="$GSD_DIR/logs/.retry"
@@ -63,6 +77,37 @@ CLAUDE_BIN="${GSD_LITE_CLAUDE_BIN:-claude}"
 PERMISSION_MODE="${GSD_LITE_PERMISSION_MODE:-acceptEdits}"
 
 die() { echo "gsd-lite-loop: $*" >&2; exit 6; }
+
+resolve_state() { # MODE / MS_DIR / STATE / SLUG / TARGET を決める（state が無くても die しない。有無は呼び手が見る）
+  MODE=repo; MS_DIR="$GSD_DIR"; STATE="$MS_DIR/state.json"; SLUG=""; TARGET=.
+  if [ ! -f "$STATE" ] && [ -f "$CONFIG" ]; then
+    MODE=control
+    local br
+    br=$(git branch --show-current 2>/dev/null || echo "")
+    case "$br" in
+      gsd-lite/?*) SLUG="${br#gsd-lite/}" ;;
+      *) return 0 ;;   # 制御ブランチにいない: STATE は存在しないパスのまま（require_state が案内する）
+    esac
+    MS_DIR="$GSD_DIR/milestones/$SLUG"; STATE="$MS_DIR/state.json"
+  fi
+  if [ -f "$STATE" ] && command -v jq >/dev/null; then
+    TARGET=$(jq -r '.target.path // "."' "$STATE" 2>/dev/null || echo .)
+    [ -n "$TARGET" ] || TARGET=.
+  fi
+}
+
+require_state() { # state.json が無ければ場所に応じた案内で die
+  [ -f "$STATE" ] && return 0
+  if [ "$MODE" = control ]; then
+    if [ -z "$SLUG" ]; then
+      die "control repository: not on a milestone branch (gsd-lite/<slug>) — run /gsd-lite-discuss to start a milestone, or git checkout gsd-lite/<slug>"
+    fi
+    die "no $STATE for milestone '$SLUG' (run /gsd-lite-discuss on this branch first)"
+  fi
+  die "no $STATE here (run /gsd-lite-init first, from the project root)"
+}
+
+tgit() { git -C "$TARGET" "$@"; }   # 対象リポジトリへの git（in-repo では今いるリポジトリ）
 
 sget() { jq -r "$1" "$STATE"; }
 
@@ -84,27 +129,41 @@ committed_state() { # コミット済み (HEAD) の state から値を読む
   git show "HEAD:$STATE" 2>/dev/null | jq -r "$1"
 }
 
+count_commits() { # count_commits <before> <after> [<repo dir>] — 2 つの HEAD の間に増えたコミット数
+  local before=$1 after=$2 dir=${3:-.}
+  if [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
+    git -C "$dir" rev-list --count "$before..$after" 2>/dev/null || echo 0
+  else
+    echo 0
+  fi
+}
+
 record_turn() { # 1 試行ぶんの計測値を logs/<milestone>/turns.jsonl に追記（reflect の客観材料。トークン不要）
-  local head_after finished_epoch commits progressed
+  local head_after finished_epoch commits progressed target_head_after target_commits target_json
   head_after=$(git rev-parse HEAD 2>/dev/null || echo "")
   finished_epoch=$(date +%s)
-  commits=0
-  if [ -n "$head_before" ] && [ -n "$head_after" ] && [ "$head_before" != "$head_after" ]; then
-    commits=$(git rev-list --count "$head_before..$head_after" 2>/dev/null || echo 0)
-  fi
+  commits=$(count_commits "$head_before" "$head_after")
   progressed=false
   [ "$turn_after" -gt "$turn_before" ] && progressed=true
+  # 対象が別リポジトリ（control）のときは、対象側に増えたコード側のコミット数も残す
+  target_json='{}'
+  if [ "$TARGET" != . ]; then
+    target_head_after=$(tgit rev-parse HEAD 2>/dev/null || echo "")
+    target_commits=$(count_commits "$target_head_before" "$target_head_after" "$TARGET")
+    target_json=$(jq -nc --arg t "$TARGET" --arg b "$target_head_before" --arg a "$target_head_after" \
+      --argjson c "${target_commits:-0}" '{target:$t, target_head_before:$b, target_head_after:$a, target_commits:$c}')
+  fi
   jq -nc \
     --argjson turn "$((turn_before + 1))" --arg phase "$phase" --arg engine "$ENGINE" \
     --arg model "$model" --argjson attempt "$((retry + 1))" --arg started "$started_at" \
     --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson duration "$((finished_epoch - started_epoch))" \
     --argjson rc "$rc" --argjson progressed "$progressed" --argjson commits "${commits:-0}" \
     --arg head_before "$head_before" --arg head_after "$head_after" --arg log "$log" \
-    --arg token_var "$token_var" \
+    --arg token_var "$token_var" --argjson target "$target_json" \
     '{turn:$turn, phase:$phase, engine:$engine, model:$model, attempt:$attempt,
       started_at:$started, finished_at:$finished, duration_s:$duration, rc:$rc,
       progressed:$progressed, commits:$commits, head_before:$head_before, head_after:$head_after,
-      log:$log, token_var:$token_var}' >> "$logdir/turns.jsonl" 2>/dev/null || true
+      log:$log, token_var:$token_var} + $target' >> "$logdir/turns.jsonl" 2>/dev/null || true
 }
 
 finish() { # finish <exit_code> — on-exit フックを呼んで終了
@@ -178,8 +237,47 @@ check_config() {
       die "missing $skill_dir/gsd-lite-$check_phase/SKILL.md (update project skills before starting)"
   done
   check_git_identity
+  check_target
   check_codex_sandbox
   check_claude_tokens
+}
+
+check_target() {
+  # state.target.path が "." 以外（対象が別リポジトリ）のときの前提。in-repo 形では何もしない。
+  # 対象は制御リポジトリ配下の相対パスで、制御側 git に入らない（gitignore か submodule）こと。
+  # 無人ターンは `git add -A` 相当の操作をするので、対象ツリーが制御側に混入する事故をここで防ぐ
+  [ "$TARGET" != . ] || return 0
+  case "$TARGET" in
+    /*|../*|*/../*|*/..|..) die "target.path must be a relative path inside this repository (got: $TARGET)" ;;
+  esac
+  if [ ! -d "$TARGET" ]; then
+    local url
+    url=$(jq -r --arg p "$TARGET" '[.targets[]? | select(.path == $p) | .url] | first // empty' "$CONFIG" 2>/dev/null || echo "")
+    die "target repository $TARGET is missing — clone it first: git clone ${url:-<url>} $TARGET"
+  fi
+  tgit rev-parse --git-dir >/dev/null 2>&1 || die "target $TARGET is not a git repository"
+  if ! git check-ignore -q -- "$TARGET" 2>/dev/null && \
+     ! git ls-files --stage -- "$TARGET" 2>/dev/null | grep -q '^160000 '; then
+    die "target $TARGET must be gitignored (or a submodule) in this repository — add '${TARGET%%/*}/' to .gitignore so unattended commits never pull the target tree into the control repository"
+  fi
+  tgit var GIT_COMMITTER_IDENT >/dev/null 2>&1 ||
+    die "git identity is not configured in target $TARGET — set user.name / user.email there too (every turn commits code in the target)"
+  check_target_branch
+}
+
+check_target_branch() {
+  # research / plan / impl / verify のあいだ、対象は state.branch.name（マイルストーンブランチ）にいなければならない。
+  # 別ブランチ（特に base）にいると、次のターンがそこへ直接コミットしてしまう。
+  # reflect と終端（done / blocked）は、ローカル運用の verify が base へマージした後なので確認しない
+  [ "$TARGET" != . ] || return 0
+  local want have phase
+  phase=$(sget '.phase')
+  case "$phase" in research|plan|impl|verify) ;; *) return 0 ;; esac
+  want=$(sget '.branch.name // empty')
+  [ -n "$want" ] || return 0
+  have=$(tgit branch --show-current 2>/dev/null || echo "")
+  [ "$have" = "$want" ] ||
+    die "target $TARGET is on branch '${have:-<detached>}' but the milestone expects '$want' — git -C $TARGET checkout $want (or fix state.branch) before starting"
 }
 
 check_claude_tokens() {
@@ -269,8 +367,20 @@ token_summary() { # トークン切り替えの状態 1 行（値は出さない
 }
 
 status() {
-  [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first)"
+  require_state
   echo "== gsd-lite status =="
+  if [ "$MODE" = control ]; then
+    echo "mode      : control ($MS_DIR)"
+  else
+    echo "mode      : in-repo"
+  fi
+  if [ "$TARGET" != . ]; then
+    if [ -d "$TARGET" ] && tgit rev-parse --git-dir >/dev/null 2>&1; then
+      echo "target    : $TARGET (branch: $(tgit branch --show-current 2>/dev/null || echo '?'))"
+    else
+      echo "target    : $TARGET (MISSING — clone it first)"
+    fi
+  fi
   echo "engine    : ${GSD_LITE_ENGINE:-$(sget '.engine // "claude"')}"
   jq -r '"milestone : \(.milestone)\nphase     : \(.phase)\nturn      : \(.turn)/\(.max_turns)\nnext      : \(.next_command)\nverify    : round \(.verify_round)/\(.verify_round_max)\nbranch    : \(.branch.name) (base: \(.branch.base))\nupdated   : \(.updated_at)"' "$STATE"
   for display_phase in $PHASES; do
@@ -291,17 +401,21 @@ status() {
   else
     echo "loop      : not running"
   fi
-  if [ -f "$GSD_DIR/PLAN.md" ]; then
+  if [ -f "$MS_DIR/PLAN.md" ]; then
     echo "-- current task --"
-    grep -m1 '^- \[ \]' "$GSD_DIR/PLAN.md" || echo "(no unchecked task)"
+    grep -m1 '^- \[ \]' "$MS_DIR/PLAN.md" || echo "(no unchecked task)"
   fi
-  if [ -f "$GSD_DIR/PROGRESS.md" ]; then
+  if [ -f "$MS_DIR/PROGRESS.md" ]; then
     echo "-- recent progress --"
-    tail -n 6 "$GSD_DIR/PROGRESS.md"
+    tail -n 6 "$MS_DIR/PROGRESS.md"
   fi
   if git rev-parse --git-dir >/dev/null 2>&1; then
     echo "-- recent commits --"
     git log --oneline -5 2>/dev/null || true
+  fi
+  if [ "$TARGET" != . ] && tgit rev-parse --git-dir >/dev/null 2>&1; then
+    echo "-- recent target commits ($TARGET) --"
+    tgit log --oneline -5 2>/dev/null || true
   fi
 }
 
@@ -321,7 +435,7 @@ watch_render() { # 1 画面ぶんを標準出力に描く
   local cols log line n
   cols=$(tput cols 2>/dev/null || echo 120)
   status
-  if [ -f "$GSD_DIR/PLAN.md" ]; then
+  if [ -f "$MS_DIR/PLAN.md" ]; then
     echo "-- tasks --"
     n=0
     while IFS= read -r line; do
@@ -331,7 +445,7 @@ watch_render() { # 1 画面ぶんを標準出力に描く
         '- [ ]'*) printf '  %s\n' "$line" ;;
         *) printf '  \033[2m%s\033[0m\n' "$line" ;;
       esac
-    done < <(grep -E '^- \[( |x)\]' "$GSD_DIR/PLAN.md")
+    done < <(grep -E '^- \[( |x)\]' "$MS_DIR/PLAN.md")
   fi
   log=$(latest_turn_log)
   if [ -n "$log" ]; then
@@ -341,7 +455,7 @@ watch_render() { # 1 画面ぶんを標準出力に描く
 }
 
 watch() {
-  [ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first)"
+  require_state
   local interval="${GSD_LITE_WATCH_INTERVAL:-3}" key rc
   trap 'tput cnorm 2>/dev/null; echo' EXIT
   tput civis 2>/dev/null
@@ -368,19 +482,20 @@ watch() {
 
 # ---- entry ----
 
+resolve_state
 case "${1:-}" in
   --stop)
-    [ -f "$STATE" ] || die "no $STATE here"
+    require_state
     mkdir -p "$GSD_DIR/logs" || die "cannot create logs directory"
     touch "$STOPFILE" || die "cannot create $STOPFILE"
     echo "gsd-lite: stop requested; the active turn will finish before stopping"
     exit 0 ;;
   --status) status; exit 0 ;;
   --watch) command -v jq >/dev/null || die "jq is required"; watch; exit 0 ;;
-  --watch-once) command -v jq >/dev/null || die "jq is required"; [ -f "$STATE" ] || die "no $STATE here"; watch_render; exit 0 ;;
+  --watch-once) command -v jq >/dev/null || die "jq is required"; require_state; watch_render; exit 0 ;;
   --check)
     command -v jq >/dev/null || die "jq is required"
-    [ -f "$STATE" ] || die "no $STATE here"
+    require_state
     check_config
     token_summary
     echo "gsd-lite: execution configuration ready"
@@ -392,7 +507,7 @@ esac
 command -v jq >/dev/null || die "jq is required"
 command -v timeout >/dev/null || die "timeout (coreutils) is required"
 command -v flock >/dev/null || die "flock (util-linux) is required"
-[ -f "$STATE" ] || die "no $STATE here (run /gsd-lite-init first, from the project root)"
+require_state
 check_config
 git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository"
 git show "HEAD:$STATE" >/dev/null 2>&1 || die "$STATE is not committed (commit it first — the loop trusts committed state only)"
@@ -416,7 +531,7 @@ while true; do
   case "$cmd" in
     /*) ;;
     DONE)    echo "gsd-lite: milestone complete"; finish 0 ;;
-    BLOCKED) echo "gsd-lite: human input needed — see $GSD_DIR/BLOCKED.md"; finish 2 ;;
+    BLOCKED) echo "gsd-lite: human input needed — see $MS_DIR/BLOCKED.md"; finish 2 ;;
     DISCUSS) echo "gsd-lite: run /gsd-lite-discuss in an interactive session first"; finish 4 ;;
     *)       echo "gsd-lite: unknown next_command: $cmd" >&2; finish 5 ;;
   esac
@@ -438,6 +553,7 @@ while true; do
   fi
 
   phase=$(sget '.phase')
+  check_target_branch   # 対象が別リポジトリなら、毎ターン起動前にマイルストーンブランチにいることを確認する
   select_engine "$phase"
   retry=$(get_retry)
   model=$(model_for "$ENGINE" "$phase")
@@ -462,6 +578,11 @@ while true; do
     agent_args+=(--add-dir "$(git rev-parse --absolute-git-dir)")
     git_common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd)
     agent_args+=(--add-dir "$git_common_dir")
+    if [ "$TARGET" != . ]; then
+      # 対象リポジトリ（control）の Git 管理ディレクトリも書けるようにする（clone なら workspace 内だが worktree に備える）
+      agent_args+=(--add-dir "$(tgit rev-parse --absolute-git-dir)")
+      agent_args+=(--add-dir "$(cd "$(tgit rev-parse --git-common-dir)" 2>/dev/null && pwd || tgit rev-parse --absolute-git-dir)")
+    fi
     effort=$(jq -r --arg phase "$phase" '.codex.reasoning_effort[$phase] // empty' "$STATE")
     if [ -n "$effort" ]; then
       case "$effort" in
@@ -471,7 +592,7 @@ while true; do
       agent_args+=(-c "model_reasoning_effort=\"$effort\"")
     fi
     [ -z "$model" ] || agent_args+=(--model "$model")
-    agent_args+=("\$$skill_name — Read $skill_file and execute exactly one unattended turn. Follow its state update and git commit procedure. If blocked, record the reason in .gsd-lite/BLOCKED.md and commit the blocked state.")
+    agent_args+=("\$$skill_name — Read $skill_file and execute exactly one unattended turn. Follow its state update and git commit procedure. If blocked, record the reason in $MS_DIR/BLOCKED.md and commit the blocked state.")
   elif [ "$ENGINE" = opencode ]; then
     # 無人ターンは承認プロンプトに応答できないので、明示的に deny されていない権限を自動承認する
     # （opencode.json の deny ルールはそのまま効く）。スキルは skill ツール経由で読み込ませる。
@@ -481,7 +602,7 @@ while true; do
     [ -z "$model" ] || agent_args+=(--model "$model")
     [ -z "$variant" ] || agent_args+=(--variant "$variant")
     [ -z "$agent" ] || agent_args+=(--agent "$agent")
-    agent_args+=("Load the skill named $skill_name with the skill tool (its file is $skill_file) and execute exactly one unattended turn. Follow its state update and git commit procedure. If blocked, record the reason in .gsd-lite/BLOCKED.md and commit the blocked state.")
+    agent_args+=("Load the skill named $skill_name with the skill tool (its file is $skill_file) and execute exactly one unattended turn. Follow its state update and git commit procedure. If blocked, record the reason in $MS_DIR/BLOCKED.md and commit the blocked state.")
   else
 
     agent_args=(-p "$cmd" --permission-mode "$PERMISSION_MODE")
@@ -495,6 +616,8 @@ while true; do
   fi
   echo "gsd-lite: turn $((turn_before + 1)) [$ENGINE/$phase] $cmd (attempt $((retry + 1)))${token_var:+ (token: $token_var)}"
   head_before=$(git rev-parse HEAD 2>/dev/null || echo "")
+  target_head_before=""
+  [ "$TARGET" = . ] || target_head_before=$(tgit rev-parse HEAD 2>/dev/null || echo "")
   started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   started_epoch=$(date +%s)
   # 親が Claude Code セッションでもネスト起動できるよう、セッション由来の環境変数を除去。
@@ -521,15 +644,15 @@ while true; do
     retry_max=$(sget '.retry_max')
     echo "gsd-lite: no committed progress (rc=$rc, attempt $retry/$((retry_max + 1))) — see $log" >&2
     if [ "$retry" -gt "$retry_max" ]; then
-      echo "gsd-lite: turn made no progress after $retry attempts — auto-BLOCKED" >&2
+      echo "gsd-lite: turn made no progress after $retry attempts — auto-BLOCKED (see $MS_DIR/BLOCKED.md)" >&2
       supdate '.next_command = "BLOCKED" | .phase = "blocked"'
       {
         echo "# BLOCKED (auto)"
         echo ""
         echo "ループが自動生成した BLOCKED です。ターンが state.json を（コミットまで含めて）"
         echo "更新せずに $retry 回連続で終了しました。最後のログ: $log"
-      } > "$GSD_DIR/BLOCKED.md"
-      git add "$STATE" "$GSD_DIR/BLOCKED.md" 2>/dev/null && \
+      } > "$MS_DIR/BLOCKED.md"
+      git add "$STATE" "$MS_DIR/BLOCKED.md" 2>/dev/null && \
         git commit -qm "gsd-lite(loop): auto-BLOCKED (no progress after $retry attempts)" ||
         echo "gsd-lite: WARN failed to commit the auto-BLOCKED state（git 識別や hook を確認。作業ツリーの $STATE は blocked のまま）" >&2
       finish 2

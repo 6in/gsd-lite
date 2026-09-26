@@ -9,9 +9,28 @@ disable-model-invocation: true
 これは無人ターン。**ユーザーに質問できない**。discuss の決定を事実で補強するのが
 役目で、要件を書き換える権限は原則ない。成果は RESEARCH.md に集約して plan に渡す。
 
+## 作業場所の解決（最初に 1 回。全エンジン共通）
+
+```bash
+if [ -f .gsd-lite/state.json ]; then MS=.gsd-lite
+else MS=.gsd-lite/milestones/$(git branch --show-current | sed 's#^gsd-lite/##'); fi
+TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
+```
+
+- `$MS` = マイルストーンディレクトリ。state.json と成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN /
+  PROGRESS / VERIFICATION / BLOCKED）はここ。従来の in-repo 形では `.gsd-lite/` そのもの。
+  制御リポジトリ（gsd-control）形では `.gsd-lite/milestones/<slug>/`（slug は今いる制御ブランチ `gsd-lite/<slug>`）
+- `$TARGET` = コードを書く対象リポジトリ。`.` なら今いるリポジトリ（従来どおり）。`work/<name>` なら
+  gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C $TARGET` /
+  `cd $TARGET` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
+  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`$TARGET/CLAUDE.md` 等が
+  あれば最初に読んで規約に従う。`$TARGET` の中身を制御側に `git add` しない（gitignore 済み）
+- `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）
+
 ## 手順
 
-1. `.gsd-lite/state.json` / `REQUIREMENTS.md` / `DECISIONS.md` を読む
+1. `$MS/state.json` / `REQUIREMENTS.md` / `DECISIONS.md` を読む。既存コードとの整合を見るときの
+   コードベースは `$TARGET` 配下（`$TARGET/CLAUDE.md` / `AGENTS.md` があれば先に読む）
 2. `state.json` の `research.targets` にある対象だけを調査する:
    - `similar_oss`: 同じ課題を解く既存 OSS・プロダクト・記事を Web 検索。
      「作らなくてよいもの」と「盗める設計」を探す
@@ -19,21 +38,21 @@ disable-model-invocation: true
      落とし穴を調査し、plan の技術前提を固める
    - `local_projects`: `research.local_search_paths` 配下の過去プロジェクトから
      同型の実装・雛形を探す（パス付きで記録）
-3. `.gsd-lite/RESEARCH.md` に産出:
+3. `$MS/RESEARCH.md` に産出:
    - 参考実装（ローカルパス / URL 付き）
    - 盗める設計・使えるライブラリ
    - 落とし穴と回避策
    - 要件への影響（受け入れ基準に足すべき観点があれば**提案として**記載。
      REQUIREMENTS.md 本文は書き換えない）
 4. **重大発見の扱い**: discuss の決定を覆しうる発見（例: 要件をほぼ満たす既存 OSS が
-   あった）は、要旨と選択肢+推奨を `.gsd-lite/BLOCKED.md` に書いて BLOCKED で停止する
+   あった）は、要旨と選択肢+推奨を `$MS/BLOCKED.md` に書いて BLOCKED で停止する
    （下記手順で `next_command: "BLOCKED"`）。「作るか使うか」は投資判断なので人間に戻す。
    覆さない発見は RESEARCH.md に記録して続行
 5. 正常終了時は `phase: "plan"` / `next_command: "/gsd-lite-plan"` にする
 
 ## ターン終了の共通手順（必須・この順で）
 
-1. `.gsd-lite/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
+1. `$MS/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
    やり直しは正直に書く。なければ「なし」「0 回」と書く。`<N>` は**このターンで +1 した後の
    `state.turn`**（= ループが `turn N [...]` と表示する番号、research が turn 1）。
    やり直しの原因が次のターンでも起こり得るなら、**同じ内容を「次への注意」にも書く**）:
@@ -50,6 +69,6 @@ disable-model-invocation: true
 3. 成果物・PROGRESS.md・state.json を**まとめて git commit**（`gsd-lite(research): <要約>`）。
    **state 更新 → commit の順序が重要**: 逆にすると最終 state が未コミットで残り、
    git からの復元時に完了済みフェーズを再実行してしまう
-4. 判断に迷ったら推測しない: `.gsd-lite/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
+4. 判断に迷ったら推測しない: `$MS/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
    `next_command: "BLOCKED"` / `phase: "blocked"`（turn は +1）にしたうえで
    同様にコミットして終了する

@@ -1,6 +1,6 @@
 ---
 name: gsd-lite-init
-description: gsd-lite をプロジェクトにセットアップする。雛形スキル・allowlist・.gsd-lite/ の足場を生成してコミットする（要件の中身には踏み込まない）。プロジェクトごとに 1 回、対話セッションで実行する。
+description: gsd-lite をセットアップする。対象リポジトリ内に直接（従来の in-repo 形）か、対象を work/ に clone して state と成果物だけを持つ制御リポジトリ（gsd-control 形）を生成してコミットする（要件の中身には踏み込まない）。プロジェクトごとに 1 回、対話セッションで実行する。
 disable-model-invocation: true
 ---
 
@@ -8,6 +8,17 @@ disable-model-invocation: true
 
 足場の生成のみを行う。要件の中身には踏み込まない（それは /gsd-lite-discuss の仕事）。
 実行中のホストに応じて以下を使う（install.sh が配置済み）。
+
+2 つの形がある。どちらも `state.target.path` が「コードを書く対象」を指す:
+
+| 形 | 場所 | 向いている状況 |
+|---|---|---|
+| **in-repo**（従来・既定） | 対象リポジトリのルートで実行。`.gsd-lite/` とスキルが対象の git に入る | 1 人で使う。`.gsd-lite/` を対象の main に入れてよい |
+| **gsd-control**（制御リポジトリ） | 対象とは別の空ディレクトリで実行。対象は `work/<name>` に clone（gitignore）し、state・成果物・スキル・allowlist は制御側の git に入る。マイルストーンごとに制御側にも `gsd-lite/<slug>` ブランチを切り、state は `.gsd-lite/milestones/<slug>/` | 複数人が同じ対象で gsd-lite を使う（`.gsd-lite/` の衝突を避ける）。対象の main にコードだけを入れたい |
+
+`FRESH` のとき（下の手順 1）は AUQ でどちらにするかを聞く（推奨は in-repo。対象リポジトリの
+中で実行しているなら in-repo、空ディレクトリなら gsd-control を先頭に）。gsd-control を選んだら
+手順 C へ。
 
 | ホスト | テンプレート | プロジェクトのスキル配置先 | 呼び出し |
 |---|---|---|---|
@@ -35,7 +46,7 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
    git var GIT_COMMITTER_IDENT >/dev/null 2>&1 && echo "IDENT_OK" || echo "NO_IDENT"
    command -v jq >/dev/null && echo "JQ_OK" || echo "NO_JQ"
    command -v gsd-lite-loop.sh >/dev/null && echo "LOOP_OK" || echo "NO_LOOP"
-   test -f .gsd-lite/state.json && echo "ALREADY_INIT" || echo "FRESH"
+   test -f .gsd-lite/state.json && echo "ALREADY_INIT" || { test -f .gsd-lite/config.json && echo "ALREADY_CONTROL" || echo "FRESH"; }
    ls ~/.claude/gsd-lite/templates/skills 2>/dev/null | tr '\n' ' '
    ```
    - カレントがプロジェクトルート（toplevel と一致）であること。違えばユーザーに一言確認
@@ -43,12 +54,15 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
    - `NO_IDENT` ならループも各ターンも state をコミットできず無進捗で止まるので、
      この時点で `user.name` / `user.email` を設定してもらう
    - `NO_JQ` / `NO_LOOP` なら導入方法を案内して中断
-2. **既存チェック**: `.gsd-lite/state.json` が既にあればセットアップ済み。その場合は
-   AskUserQuestion で「**スキル・allowlist を最新テンプレートに更新するか**」を確認する:
+2. **既存チェック**: `.gsd-lite/state.json`（in-repo）または `.gsd-lite/config.json`（gsd-control）が
+   既にあればセットアップ済み。その場合は
+   AskUserQuestion で「**スキル・allowlist を最新テンプレートに更新するか**」を確認する
+   （gsd-control では加えて「**対象リポジトリを追加登録するか**」も選べる → 手順 C1〜C2 の対象登録部分だけを行う）:
    - 更新する → 手順 3 のスキルコピーと手順 4 の allowlist マージ**だけ**を行い
      （`cp -r` で上書き。`.gsd-lite/PLAN.template.md` も上書きしてよい）、
      その変更だけをコミット（`gsd-lite: update skills`）。
-     **`.gsd-lite/state.json` と成果物には一切触れない**（進行中マイルストーンを壊さない）
+     **`.gsd-lite/state.json`（gsd-control では `.gsd-lite/milestones/*/` と `config.json` の `defaults`）と
+     成果物には一切触れない**（進行中マイルストーンを壊さない）
    - 更新しない → 何もせず終了
    （gsd-lite 本体を更新した後、既存プロジェクトに反映するのはこの手順。
    install.sh はテンプレートを更新するだけで、配布済みプロジェクトには届かない）
@@ -114,6 +128,49 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
 6. **コミット**: 現在のブランチ（= 以後の base ブランチ）に
    `gsd-lite: scaffold` としてコミット
 7. **案内**: 「次は同じセッションで `/gsd-lite-discuss <やりたいこと>`」と伝えて終了
+
+## 手順 C — gsd-control 形（制御リポジトリを生成する）
+
+前提: カレントは対象リポジトリの**外**の空ディレクトリ（または制御リポジトリにしたい既存の
+空に近い git リポジトリ）。対象リポジトリの中で選ばれたら in-repo を勧め直す。
+
+- **C1. 対象の指定**（AUQ / 対話で 1 回にまとめて聞く）: 対象の clone URL（推奨。ローカルパスも可だが、
+  `work/<name>` の origin がそのパスになるので verify のリモート判定はその origin で行われる）、
+  名前 `<name>`（既定は URL 末尾から `.git` を除いたもの）、base ブランチ（既定 `main`）。
+  すでに `work/<name>` に clone 済みならそれを登録するだけでよい
+- **C2. 足場生成**（1 回の Bash。テンプレートは読まずにコピーする）:
+  ```bash
+  T=~/.claude/gsd-lite/templates            # Codex: ~/.codex/gsd-lite/templates, OpenCode: ~/.config/opencode/gsd-lite/templates
+  S=.claude/skills                          # Codex: .agents/skills, OpenCode: .opencode/skills
+  NAME=<name>; URL=<url>; BASE=<base>
+  git rev-parse --git-dir >/dev/null 2>&1 || git init -q -b main
+  mkdir -p .gsd-lite/milestones .gsd-lite/logs .gsd-lite/hooks .gsd-lite/reflect work "$S"
+  [ -f .gsd-lite/config.json ] || cp "$T/config.json" .gsd-lite/config.json
+  jq --arg n "$NAME" --arg u "$URL" --arg b "$BASE" '.targets[$n] = {path: ("work/" + $n), url: $u, base: $b}' \
+    .gsd-lite/config.json > .gsd-lite/config.json.tmp && mv .gsd-lite/config.json.tmp .gsd-lite/config.json
+  touch .gsd-lite/milestones/.gitkeep
+  cp "$T/PLAN.template.md" .gsd-lite/PLAN.template.md
+  cp -r "$T/skills/." "$S/"
+  for l in 'work/' '.gsd-lite/logs/' '.gsd-lite/loop.pid'; do grep -qxF "$l" .gitignore 2>/dev/null || echo "$l" >> .gitignore; done
+  [ -d "work/$NAME/.git" ] || git clone "$URL" "work/$NAME"
+  git -C "work/$NAME" var GIT_COMMITTER_IDENT >/dev/null 2>&1 && echo "TARGET_IDENT_OK" || echo "TARGET_NO_IDENT"
+  ls "work/$NAME" | head -20
+  ```
+  - `state.json` はここでは作らない（マイルストーンごとに discuss が `config.json` の `defaults` から
+    `.gsd-lite/milestones/<slug>/state.json` を作る）。エンジン・モデルの既定を変えたい指示があれば
+    `config.json` の `defaults`（キーは state.json と同じ）を `jq` で書き換える
+  - `work/` は **gitignore が必須**。ループは対象が制御側 git に入っていない（ignore か submodule）ことを
+    起動前に検証し、違えば止まる。`TARGET_NO_IDENT` なら対象側でも `user.name` / `user.email` を設定してもらう
+- **C3. allowlist マージ**（Claude のみ）: 手順 4 と同じ jq マージを行う。ただし `EXTRA` は広くする:
+  `"Bash(git:*)"` `"Bash(gh:*)"` `"Bash(glab:*)"` に加え、**対象側**のファイルの有無で決めるテストランナー
+  （`work/<name>/package.json` → `Bash(npm test:*)` `Bash(npm run:*)` ... 手順 4 の判定表を `work/<name>/` に
+  対して適用）。無人ターンは制御側のカレントから `git -C work/<name> ...` を実行するので、
+  サブコマンド単位の許可では足りない
+- **C4. コミット**: 制御側の現在のブランチ（通常 main = 制御側の base）に `gsd-lite: scaffold (control)`
+- **C5. 案内**: 「次は同じセッションで `/gsd-lite-discuss <やりたいこと>`。対象の CLAUDE.md /
+  AGENTS.md は自動では読まれないので、discuss / plan / impl が `work/<name>/CLAUDE.md` を明示的に読む」と伝える。
+  ループは**制御リポジトリのルートで**制御ブランチ `gsd-lite/<slug>` にいる状態で起動する
+  （`work/<name>` の中で起動すると state が見つからず終了コード 6）
 
 ## 実行パターン
 

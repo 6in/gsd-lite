@@ -10,6 +10,24 @@ disable-model-invocation: true
 記録から言えることだけを書く。記録にないことは書かない。推測は「推測:」と明記する。
 Minus と Interesting の各項目には**根拠**（ターン番号 / コミット / ファイル名）を必ず添える。
 
+## 作業場所の解決（最初に 1 回。全エンジン共通）
+
+```bash
+if [ -f .gsd-lite/state.json ]; then MS=.gsd-lite
+else MS=.gsd-lite/milestones/$(git branch --show-current | sed 's#^gsd-lite/##'); fi
+TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
+```
+
+- `$MS` = マイルストーンディレクトリ。state.json と成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN /
+  PROGRESS / VERIFICATION / BLOCKED）はここ。従来の in-repo 形では `.gsd-lite/` そのもの。
+  制御リポジトリ（gsd-control）形では `.gsd-lite/milestones/<slug>/`（slug は今いる制御ブランチ `gsd-lite/<slug>`）
+- `$TARGET` = コードを書く対象リポジトリ。`.` なら今いるリポジトリ（従来どおり）。`work/<name>` なら
+  gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C $TARGET` /
+  `cd $TARGET` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
+  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`$TARGET/CLAUDE.md` 等が
+  あれば最初に読んで規約に従う。`$TARGET` の中身を制御側に `git add` しない（gitignore 済み）
+- `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）
+
 ## 2 つの呼ばれ方
 
 | 状況 | 判定 | ふるまい |
@@ -18,28 +36,31 @@ Minus と Interesting の各項目には**根拠**（ターン番号 / コミッ
 | 手動（`/gsd-lite-reflect`、Codex は `$gsd-lite-reflect`） | `phase` が `done`（または reflect 以外） | 追加の振り返りを書き、**ファイルと PROGRESS.md だけ**をコミット。state の `phase` / `next_command` / `turn` には触らない |
 
 手動のときは「対象範囲」を前回の振り返り以降のコミット（`<前回の head>..HEAD`）にする。
-前回の振り返りがなければマイルストーンブランチ全体（`branch.base...HEAD`）。
+前回の振り返りがなければマイルストーンブランチ全体（`branch.base...HEAD`）。範囲は対象リポジトリ
+（`git -C $TARGET`）のコミットで数える。
 
 ## 読む記録（この順で。全部読んでから書く）
 
-1. `.gsd-lite/state.json`: milestone / branch / turn / verify_round / fix_round /
+1. `$MS/state.json`: milestone / branch / turn / verify_round / fix_round /
    engine / phase_engines / model・codex・opencode / subagents
 2. `.gsd-lite/logs/<milestone>/turns.jsonl`: ループが 1 試行ごとに記録した客観データ
-   （phase / engine / model / attempt / 所要秒 / rc / progressed / commits）。
+   （phase / engine / model / attempt / 所要秒 / rc / progressed / commits。gsd-control 形では
+   対象側に増えたコード側のコミット数 `target_commits` も）。
    ここから**フェーズ別の所要時間・リトライが起きたターン・無進捗の試行**を集計する。
    `jq` でまとめて読む（例: `jq -s 'group_by(.phase) | map({phase: .[0].phase, turns: length, sec: (map(.duration_s) | add), retries: map(select(.attempt > 1)) | length})'`）
-3. `.gsd-lite/PROGRESS.md`: 各ターンの申し送り（やったこと / 想定外 / やり直し / 次への注意）。
+3. `$MS/PROGRESS.md`: 各ターンの申し送り（やったこと / 想定外 / やり直し / 次への注意）。
    「想定外」と「やり直し」の欄が Minus の主材料
-4. `git log --format='%h %ad %s' --date=iso <branch.base>...HEAD`（または対象範囲）と
-   `git diff --stat <範囲>`: コミットの粒度、`F1` 等の差し戻し修正、BLOCKED からの再開、
-   人間の介入コミット
-5. `.gsd-lite/PLAN.md`: 計画タスク数と実際の impl ターン数の差、追加・分割されたタスク、
+4. `git -C $TARGET log --format='%h %ad %s' --date=iso <branch.base>...HEAD`（または対象範囲）と
+   `git -C $TARGET diff --stat <範囲>`: コミットの粒度、`F1` 等の差し戻し修正、BLOCKED からの再開、
+   人間の介入コミット。gsd-control 形では制御側の `git log --oneline -- $MS` も読む
+   （state・成果物のコミット列 = ターンの列。対象側のコード履歴と突き合わせる）
+5. `$MS/PLAN.md`: 計画タスク数と実際の impl ターン数の差、追加・分割されたタスク、
    並列サブ作業が使われたか
-6. `.gsd-lite/VERIFICATION.md`: verify の指摘と残留リスク。修正ラウンドなら
+6. `$MS/VERIFICATION.md`: verify の指摘と残留リスク。修正ラウンドなら
    「なぜ最初の verify で見つからなかったか」を考える
-7. `git log --all --oneline -- .gsd-lite/BLOCKED.md` と各時点の内容: 何で止まり、
+7. `git log --all --oneline -- $MS/BLOCKED.md` と各時点の内容: 何で止まり、
    人間がどう解決したか
-8. `.gsd-lite/REQUIREMENTS.md` / `DECISIONS.md` / `RESEARCH.md`: 決定が守られたか、
+8. `$MS/REQUIREMENTS.md` / `DECISIONS.md` / `RESEARCH.md`: 決定が守られたか、
    調査が計画に活かされたか（PLAN.md のメモが RESEARCH を参照しているか）
 9. `.gsd-lite/reflect/` の既存ファイル（あれば直近 2 件）: 前回の「次回への提案」が
    今回守られたかを必ず確認する
@@ -99,19 +120,20 @@ Minus と Interesting の各項目には**根拠**（ターン番号 / コミッ
 
 ## ターン終了の共通手順（ループから呼ばれた場合。必須・この順で）
 
-1. `.gsd-lite/PROGRESS.md` に追記（固定項目。次の項を参照。`<N>` はこのターンで +1 した後の
+1. `$MS/PROGRESS.md` に追記（固定項目。次の項を参照。`<N>` はこのターンで +1 した後の
    `state.turn` = ループの表示番号）
 2. `state.json` を更新: `phase: "done"` / `next_command: "DONE"`、`turn` を +1、
    `updated_at` を現在時刻（ISO 8601）に。**turn の +1 を忘れるとループが
    リトライ扱いにするので必ず行う**
 3. 振り返りファイル・PROGRESS.md・state.json を**まとめて git commit**
    （`gsd-lite(reflect): <slug> 振り返り`）。
-   verify がリモート運用（MR/PR 作成済み）なら **再 push** する（MR にこのコミットが載る）。
+   in-repo 形で verify がリモート運用（MR/PR 作成済み）なら **再 push** する（MR にこのコミットが載る）。
+   gsd-control 形では制御側にコミットするだけで、対象側には触らない。
    push の成否を確認し、失敗したら 1 回リトライ、それでも失敗なら DONE のまま終わらせず
    `next_command: "BLOCKED"` / `phase: "blocked"` にして BLOCKED.md に理由を書き
    追加コミットして終了する。**マイルストーンブランチに残ったまま終了する**（checkout しない）。
    ローカル運用（verify がベースへマージ済み）ならベースブランチ上でコミットするだけ
-4. 判断に迷ったら推測しない: `.gsd-lite/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
+4. 判断に迷ったら推測しない: `$MS/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
    `next_command: "BLOCKED"` / `phase: "blocked"`（turn は +1）にしたうえで
    同様にコミットして終了する
 

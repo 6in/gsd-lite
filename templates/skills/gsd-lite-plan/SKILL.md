@@ -9,13 +9,32 @@ disable-model-invocation: true
 これは無人ターン。**ユーザーに質問できない**。仕様の曖昧さを見つけても、discuss の
 決定範囲内で解釈できなければ BLOCKED にする（勝手に決めない）。
 
+## 作業場所の解決（最初に 1 回。全エンジン共通）
+
+```bash
+if [ -f .gsd-lite/state.json ]; then MS=.gsd-lite
+else MS=.gsd-lite/milestones/$(git branch --show-current | sed 's#^gsd-lite/##'); fi
+TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
+```
+
+- `$MS` = マイルストーンディレクトリ。state.json と成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN /
+  PROGRESS / VERIFICATION / BLOCKED）はここ。従来の in-repo 形では `.gsd-lite/` そのもの。
+  制御リポジトリ（gsd-control）形では `.gsd-lite/milestones/<slug>/`（slug は今いる制御ブランチ `gsd-lite/<slug>`）
+- `$TARGET` = コードを書く対象リポジトリ。`.` なら今いるリポジトリ（従来どおり）。`work/<name>` なら
+  gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C $TARGET` /
+  `cd $TARGET` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
+  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`$TARGET/CLAUDE.md` 等が
+  あれば最初に読んで規約に従う。`$TARGET` の中身を制御側に `git add` しない（gitignore 済み）
+- `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）
+
 ## 手順
 
-1. `.gsd-lite/REQUIREMENTS.md` / `DECISIONS.md` / `RESEARCH.md` とコードベースを読む。
+1. `$MS/REQUIREMENTS.md` / `DECISIONS.md` / `RESEARCH.md` と `$TARGET` のコードベースを読む
+   （`$TARGET/CLAUDE.md` / `AGENTS.md` があれば先に読み、規約をタスク設計に反映する）。
    `state.json` の `subagents`（`auto` / `off`、未指定は `auto`）と `fix_round` も確認する。
    **`.gsd-lite/reflect/` に振り返りがあれば直近 2 件の「次回への提案」を読み**、
    計画に反映する（反映した / しない提案と理由を PLAN.md の「メモ」に書く）
-2. `.gsd-lite/PLAN.template.md` の形式で `.gsd-lite/PLAN.md` を作成する
+2. `$MS/PLAN.template.md` の形式で `$MS/PLAN.md` を作成する
    （**修正ラウンド**（`fix_round` ≥ 1）では作り直さず、REQUIREMENTS.md の
    「修正ラウンド N」の指摘に対応するタスクを `F<round>-1`, `F<round>-2` ... として
    Tasks 末尾に追記するだけ。既存の完了タスクは触らない）:
@@ -37,6 +56,7 @@ disable-model-invocation: true
      `subagents` が `off` でも欄は書く（impl が順に処理する）
    - 依存順に並べる（impl は常に先頭の未完了タスクを取る）
    - **検証コマンド**セクションにこのプロジェクトでテストを回すコマンドを確定させる
+     （対象リポジトリのルート `$TARGET` で実行するコマンドとして書く。impl は `cd $TARGET` して実行する）
    - RESEARCH.md の参考実装・落とし穴をタスク設計に反映する
 3. ゴール逆算チェック: 全タスク完了 = REQUIREMENTS.md の受け入れ基準がすべて
    満たされる状態か確認。漏れがあればタスクを足す
@@ -44,7 +64,7 @@ disable-model-invocation: true
 
 ## ターン終了の共通手順（必須・この順で）
 
-1. `.gsd-lite/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
+1. `$MS/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
    やり直しは正直に書く。なければ「なし」「0 回」と書く。`<N>` は**このターンで +1 した後の
    `state.turn`**（= ループが `turn N [...]` と表示する番号、research が turn 1）。
    やり直しの原因が次のターンでも起こり得るなら、**同じ内容を「次への注意」にも書く**）:
@@ -61,6 +81,6 @@ disable-model-invocation: true
 3. 成果物・PROGRESS.md・state.json を**まとめて git commit**（`gsd-lite(plan): <要約>`）。
    **state 更新 → commit の順序が重要**: 逆にすると最終 state が未コミットで残り、
    git からの復元時に完了済みフェーズを再実行してしまう
-4. 判断に迷ったら推測しない: `.gsd-lite/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
+4. 判断に迷ったら推測しない: `$MS/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
    `next_command: "BLOCKED"` / `phase: "blocked"`（turn は +1）にしたうえで
    同様にコミットして終了する

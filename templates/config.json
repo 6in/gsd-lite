@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "_comment": "gsd-control（制御リポジトリ）の設定。defaults は新しいマイルストーンの state.json に写される既定値、targets は対象リポジトリの登録（path は制御リポジトリ配下の相対パスで gitignore 済みであること）。",
+  "defaults": {
+    "engine": "claude",
+    "phase_engines": {},
+    "codex": { "model": {}, "reasoning_effort": {} },
+    "opencode": { "model": {}, "variant": {}, "agent": {} },
+    "subagents": "auto",
+    "reflect": true,
+    "max_turns": 60,
+    "retry_max": 2,
+    "verify_round_max": 2,
+    "research": {
+      "targets": ["similar_oss", "official_docs", "local_projects"],
+      "local_search_paths": ["~/workspaces"]
+    },
+    "model": {
+      "research": "claude-fable-5-1",
+      "plan": "claude-fable-5-1",
+      "impl": "claude-opus-5",
+      "verify": "claude-fable-5-1",
+      "reflect": "claude-fable-5-1"
+    }
+  },
+  "targets": {}
+}

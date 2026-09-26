@@ -23,6 +23,17 @@
 > 各タスクに書いた「並列サブ作業」（対象ファイルが重ならない単位）をサブエージェントで並行実装し、
 > verify はレビューとセキュリティチェックを並列化する。サブエージェントはコミット・state・PLAN・
 > PROGRESS に触らず、親のターンだけが検証・コミット・マージ・push を行う（進捗判定の契約は不変）。
+> gsd-control 追補（2026-09-26）: `state.target.path` を「コードを書く対象」の唯一の抽象として導入。
+> `.`（未指定も同じ）なら本文どおり対象リポジトリ内で動く in-repo 形。`work/<name>` なら**制御リポジトリ**形で、
+> state と成果物は制御側 git の `.gsd-lite/milestones/<slug>/`（制御側にもマイルストーンごとに
+> `gsd-lite/<slug>` ブランチを切り、ループはブランチ名から state の場所を決める）、コード・ブランチ・
+> マージ・MR は `work/<name>`（gitignore 済み clone）の対象側 git に入る。`.gsd-lite/config.json`
+> （`defaults` + `targets`）が制御リポジトリの印で、`/gsd-lite-init` が生成する（テンプレートリポジトリは作らない）。
+> ループは対象の存在 / gitignore / git 識別 / マイルストーンブランチ一致を事前検証し、`turns.jsonl` に
+> `target_commits` を加える。スキルは冒頭で `$MS`（マイルストーンディレクトリ）と `$TARGET` を解決し、
+> 対象の CLAUDE.md / AGENTS.md を明示的に読む（制御側から起動するので自動では読まれない）。
+> 完了後の制御側ブランチの扱い（制御 main へマージ / reflect だけ取り込む / 放置）は人間が選ぶ。
+> 詳細は [README の制御リポジトリ方式](../README.md#制御リポジトリ方式gsd-control)。
 > 詳細なインストール・移行・権限設定は [README の Codex 手順](../README.md#codex-で使う) /
 > [OpenCode 手順](../README.md#opencode-で使う) を参照。
 
@@ -161,6 +172,24 @@ gsd-lite/
 
 `.gsd-lite/` と `.claude/skills/` は **git コミット対象**。リカバリと監査は git log + state で行う。
 
+### 制御リポジトリ側（gsd-control 形。対象は `work/<name>` に clone）
+
+```
+<gsd-control>/
+├── .claude/skills/gsd-lite-*/     # 6 スキル（対象側には置かない）
+├── .claude/settings.json          # allowlist（Bash(git:*) など広め）
+├── .gitignore                     # work/ .gsd-lite/logs/ .gsd-lite/loop.pid
+├── work/<name>/                   # 対象リポジトリの clone（git 管理外。コード・ブランチ・マージ・MR はここ）
+└── .gsd-lite/
+    ├── config.json                # defaults（新規 state の初期値）+ targets（name → path / url / base）
+    ├── milestones/<slug>/         # state.json と REQUIREMENTS / DECISIONS / RESEARCH / PLAN / PROGRESS / VERIFICATION / BLOCKED
+    ├── PLAN.template.md
+    ├── reflect/  logs/<slug>/  hooks/   # in-repo と同じ共通の場所
+```
+
+制御側ブランチ `gsd-lite/<slug>` = マイルストーン。ループは `.gsd-lite/state.json` が無く `config.json` が
+あれば制御リポジトリと判断し、現在ブランチの slug から `milestones/<slug>/state.json` を使う。
+
 ## 5. state.json スキーマ
 
 ```json
@@ -189,7 +218,10 @@ gsd-lite/
 }
 ```
 
-- `phase`: `discuss | research | plan | impl | verify | done | blocked`（表示・監査用。ループは見ない）
+- `phase`: `discuss | research | plan | impl | verify | reflect | done | blocked`（表示・監査用。ループは見ない）
+- `target`: `{ "name": "<name>", "path": "." | "work/<name>" }`。コードを書く対象リポジトリ。`.`（キー自体が
+  無い旧 state も同じ）なら今いるリポジトリ、`work/<name>` なら制御リポジトリ配下の対象（gsd-control 形）。
+  スキルは `git -C <path>` でコードを扱い、state と成果物は今いるリポジトリにコミットする
 - `branch`: discuss 完了時に確定。`name` は `gsd-lite/<slug>`（slug = milestone）、
   `base` はブランチ作成時にいたブランチ。verify 合格時のマージ先になる
 - `research.targets`: discuss の最終ラウンドで AUQ により選択（デフォルトは 3 つすべて）。

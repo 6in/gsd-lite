@@ -7,6 +7,7 @@
   "subagents": "auto",
   "reflect": true,
   "fix_round": 0,
+  "target": { "name": "", "path": "." },
   "milestone": "",
   "phase": "discuss",
   "next_command": "DISCUSS",

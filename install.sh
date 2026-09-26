@@ -46,6 +46,7 @@ install_engine() {
   cp -r "$REPO_DIR/templates" "$data_dir/templates"
   if [ "$engine" != claude ]; then
     jq --arg engine "$engine" '.engine = $engine' "$REPO_DIR/templates/state.json" > "$data_dir/templates/state.json"
+    jq --arg engine "$engine" '.defaults.engine = $engine' "$REPO_DIR/templates/config.json" > "$data_dir/templates/config.json"
     rm "$data_dir/templates/settings.allowlist.json"
   fi
   echo "  $engine skill     : $skill_dir/gsd-lite-init"

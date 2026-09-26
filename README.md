@@ -8,6 +8,8 @@ research → plan → impl → verify → 仕上げ（ローカルのみなら�
 - 毎ターン Claude Code (`claude -p`)、Codex (`codex exec`)、OpenCode (`opencode run`) のいずれかで新規コンテキスト起動。継続性は `.gsd-lite/` + git のみ
 - ループ（`gsd-lite-loop.sh`）はダム: `state.json` の `next_command` を実行するだけ
 - 1 ターン = 1 タスク。判断に迷ったら推測せず BLOCKED で人間に戻す
+- 対象リポジトリ内で直接動かす形（既定）のほか、状態・成果物だけを別の制御リポジトリに置く
+  **gsd-control 形**も選べる（`state.target.path`。複数人で同じ対象を扱うとき向け。下記）
 
 設計の全容と利用手順: [docs/SPEC.md](docs/SPEC.md)（§11 がユーザー視点のウォークスルー）
 
@@ -436,6 +438,103 @@ phase・next_command・ターン数を中断用に変更せず、完了済みの
 DONE・BLOCKED（リトライ上限到達を含む）は中断より優先する。
 実行中の処理がハングした場合は、従来どおりターンタイムアウトまで待つ。
 フラグは既存の logs/ の除外設定によりGitには入らない。
+
+## 制御リポジトリ方式（gsd-control）
+
+既定の使い方（in-repo 形）では `.gsd-lite/` とプロジェクト用スキルが対象リポジトリの git に入る。
+複数人が同じ対象リポジトリで gsd-lite を使うと、各自の `.gsd-lite/` が main へのマージで衝突し、
+対象の main にも gsd-lite の成果物が混ざる。**gsd-control 形**はこれを避けるために、
+gsd-lite の状態・成果物・スキルを**別の制御リポジトリ**に置き、対象リポジトリにはコードだけを入れる。
+
+どちらの形でも `state.json` の **`target.path`** が「コードを書く対象」を指す唯一の抽象で、
+`.` なら今いるリポジトリ（従来どおり・後方互換）、`work/<name>` なら制御リポジトリ配下に clone した対象になる。
+ループのフェーズ・遷移・進捗判定・終了コードは両方の形で同じ。
+
+| | in-repo（従来・既定） | gsd-control（制御リポジトリ） |
+|---|---|---|
+| 実行場所 | 対象リポジトリのルート | 制御リポジトリのルート |
+| state・成果物 | `.gsd-lite/`（対象の git） | `.gsd-lite/milestones/<slug>/`（制御の git） |
+| スキル・allowlist | 対象の `.claude/skills/` 等 | 制御の `.claude/skills/` 等（対象には置かない） |
+| コード・ブランチ・マージ・MR | 対象の git（同じリポジトリ） | 対象の git（`work/<name>`、gitignore 済み） |
+| マイルストーンのブランチ | 対象に `gsd-lite/<slug>` | 対象と制御の**両方**に `gsd-lite/<slug>` |
+| 完了後 | verify がマージ / MR 作成 | 対象は同じ。制御側ブランチの扱いは人間が選ぶ |
+
+### セットアップ
+
+```bash
+mkdir ~/workspaces/gsd-control && cd ~/workspaces/gsd-control
+claude
+```
+
+```
+> /gsd-lite-init      # FRESH のとき「in-repo / gsd-control」を聞かれる → gsd-control を選び、対象の URL・名前・base を答える
+> /gsd-lite-discuss 決済機能を追加したい
+```
+
+init が生成するもの:
+
+```
+gsd-control/
+├── .gsd-lite/
+│   ├── config.json          # defaults（新しいマイルストーン state の初期値）+ targets（対象の path / url / base）
+│   ├── milestones/<slug>/   # マイルストーンごとの state.json と REQUIREMENTS / PLAN / PROGRESS / VERIFICATION 等
+│   ├── reflect/  logs/  hooks/   # マイルストーンをまたいで共通（in-repo と同じ）
+│   └── PLAN.template.md
+├── .claude/skills/gsd-lite-*/   # 6 スキル（Codex: .agents/skills、OpenCode: .opencode/skills）
+├── .claude/settings.json        # allowlist（`Bash(git:*)` など広め — 無人ターンは `git -C work/<name>` を使う）
+├── .gitignore                   # work/ .gsd-lite/logs/ .gsd-lite/loop.pid
+└── work/<name>/                 # 対象リポジトリの clone（git 管理外。無ければ discuss / 手動で clone）
+```
+
+`config.json` の `defaults` は `state.json` と同じキー（engine / phase_engines / model / codex / opencode /
+subagents / reflect / max_turns / retry_max / verify_round_max / research）。
+既定を変えたいときはここを編集してコミットする（進行中のマイルストーンの state には影響しない）。
+対象は複数登録でき、discuss がマイルストーンごとに 1 つ選ぶ。
+
+### マイルストーンの流れ
+
+1. **discuss**（制御リポジトリで対話）: 対象を選び `work/<name>` を base に合わせて最新化、
+   対象の `CLAUDE.md` / `AGENTS.md` / README を読む（制御側から起動するので自動では読まれない）。
+   slug を決めたら制御側に `gsd-lite/<slug>` を切って `.gsd-lite/milestones/<slug>/` に要件を書き、
+   最後に対象側にも `gsd-lite/<slug>` を切る。state は `config.json` の `defaults` から作られ、
+   `target: {name, path}` と `branch: {name, base}`（対象側のブランチ）を持つ
+2. **ループ**（制御リポジトリのルート、制御ブランチ `gsd-lite/<slug>` で起動）: state の場所は
+   ブランチ名から決まる。各ターンはコードを `git -C work/<name>` で対象側に、成果物と state を制御側にコミットする。
+   進捗判定は従来どおり制御側の**コミット済み state** で行う
+3. **verify**: 対象側で diff を取り、リモートなしなら対象の base へマージ、あれば push + MR/PR
+   （MR 本文に制御リポジトリの成果物の場所を書く）。VERIFICATION.md は制御側
+4. **reflect**: 制御側の `.gsd-lite/reflect/` に蓄積（`turns.jsonl` には対象側に増えたコミット数
+   `target_commits` も記録される）
+5. **完了後の制御側**: `gsd-lite/<slug>` ブランチをどう扱うかは人間が選ぶ。制御 main にマージして
+   マイルストーンの記録を残す / reflect だけ取り込む / 放置のいずれでもよい。
+   マイルストーンごとにディレクトリが分かれているので、複数人のブランチをマージしても衝突しない
+
+### ループの事前検証（gsd-control で追加されるもの）
+
+`--check` と通常起動は、対象が別リポジトリのとき次も確認し、違えば終了コード 6 で止める。
+
+- 制御ブランチ `gsd-lite/<slug>` にいること（main 等では state の場所が決まらない）
+- `target.path` が制御リポジトリ配下の相対パスで、対象が存在し git リポジトリであること
+  （無ければ `config.json` の url から clone コマンドを案内）
+- 対象が制御側 git に**入っていない**こと（gitignore か submodule）。無人ターンの `git add` で
+  対象ツリーが制御側に混入する事故を防ぐ
+- 対象側でも git 識別（user.name / user.email）が設定されていること
+- research / plan / impl / verify のあいだ、対象が `branch.name` のブランチにいること
+  （別ブランチ、特に base にいると次のターンがそこへ直接コミットしてしまう。毎ターン起動前にも確認する）
+
+`--status` / `--watch` には `mode` と `target`（対象の現在ブランチ）の行と、対象側の直近コミットが加わる。
+`work/<name>` の中でループを起動しても state は見つからない（制御リポジトリのルートで起動する）。
+
+### 注意
+
+- 対象の `.claude/settings.json` や CLAUDE.md は読まれない。規約はスキルが対象のファイルを明示的に読む。
+  必要な allowlist は制御側に書く（init が `Bash(git:*)` `Bash(gh:*)` `Bash(glab:*)` と対象のテストランナーを足す）
+- リモート運用の判定は `work/<name>` の origin で行う。対象をローカルパスから clone すると origin が
+  そのパスになるので、通常は clone URL（GitHub / GitLab）を登録する
+- Codex のターンには対象の Git 管理ディレクトリも `--add-dir` で渡す。OpenCode は
+  `--dangerously-skip-permissions` のまま
+- 既存の in-repo 形プロジェクトはそのまま動く（`target.path` が無い state は `.` 扱い）。
+  in-repo から gsd-control へ移す機能はない（新しいマイルストーンから制御リポジトリで始める）
 
 ## テスト
 

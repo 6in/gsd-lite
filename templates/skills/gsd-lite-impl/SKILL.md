@@ -9,13 +9,32 @@ disable-model-invocation: true
 これは無人ターン。**1 ターン = 1 タスク**が鉄則。複数タスクをまとめてやらない
 （コンテキストが溢れて品質が落ちる。次のタスクは次のターンの自分がやる）。
 
+## 作業場所の解決（最初に 1 回。全エンジン共通）
+
+```bash
+if [ -f .gsd-lite/state.json ]; then MS=.gsd-lite
+else MS=.gsd-lite/milestones/$(git branch --show-current | sed 's#^gsd-lite/##'); fi
+TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
+```
+
+- `$MS` = マイルストーンディレクトリ。state.json と成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN /
+  PROGRESS / VERIFICATION / BLOCKED）はここ。従来の in-repo 形では `.gsd-lite/` そのもの。
+  制御リポジトリ（gsd-control）形では `.gsd-lite/milestones/<slug>/`（slug は今いる制御ブランチ `gsd-lite/<slug>`）
+- `$TARGET` = コードを書く対象リポジトリ。`.` なら今いるリポジトリ（従来どおり）。`work/<name>` なら
+  gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C $TARGET` /
+  `cd $TARGET` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
+  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`$TARGET/CLAUDE.md` 等が
+  あれば最初に読んで規約に従う。`$TARGET` の中身を制御側に `git add` しない（gitignore 済み）
+- `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）
+
 ## 手順
 
-1. `.gsd-lite/PLAN.md` の**先頭の未完了タスク（`- [ ]`）を 1 つだけ**選ぶ。
-   `.gsd-lite/PROGRESS.md` の直近の申し送りを読む。
+1. `$MS/PLAN.md` の**先頭の未完了タスク（`- [ ]`）を 1 つだけ**選ぶ。
+   `$MS/PROGRESS.md` の直近の申し送りを読む。
    未完了タスクが 1 つもなければ実装せず、`phase: "verify"` /
    `next_command: "/gsd-lite-verify"` にして共通手順で終了する
-2. タスクの完了基準・対象ファイルに従って実装する。必要な範囲のコードだけ読む
+2. タスクの完了基準・対象ファイルに従って `$TARGET` 配下で実装する。必要な範囲のコードだけ読む
+   （`$TARGET/CLAUDE.md` / `AGENTS.md` があれば規約に従う）
    - **サブエージェントによる並行実装**（任意）: `state.json` の `subagents` が `auto`
      （未指定も `auto` 扱い）で、実行エンジンがサブエージェント（Claude Code の Agent ツール、
      OpenCode の task ツール等）を使え、タスクの `並列サブ作業` が 2 つ以上あるときは、
@@ -33,19 +52,20 @@ disable-model-invocation: true
        結果が矛盾・失敗していれば親が修正する（立て直し回数は手順 3 と合算で 2 回まで）
      - `subagents` が `off`、サブ作業が 1 つ以下、またはエンジンがサブエージェントに対応して
        いない（Codex exec 等）場合は、従来通り自分で順に実装する
-3. PLAN.md の**検証コマンド**でテストを実行し、green を確認する
+3. PLAN.md の**検証コマンド**を `$TARGET` のルートで実行し（`cd $TARGET && ...`）、green を確認する
    - 通らない場合、このターン内で最大 2 回まで立て直しを試みる。それでも
      だめなら変更を stash せずそのままコミットはせず、BLOCKED にする
      （何をどう試したかを BLOCKED.md に書く）
-4. コミットし（`gsd-lite(impl): <タスクID> <要約>`）、PLAN.md のチェックボックスを
-   `- [x]` にする（この変更もコミットに含める）
+4. コードを対象側にコミットし（`git -C $TARGET add ... && git -C $TARGET commit -m "gsd-lite(impl): <タスクID> <要約>"`）、
+   `$MS/PLAN.md` のチェックボックスを `- [x]` にする（in-repo 形ではこの変更も同じコミットに含める。
+   gsd-control 形では PLAN.md は制御側にあるので、共通手順 3 の制御側コミットに含める）
 5. まだ未完了タスクが残っていれば `next_command: "/gsd-lite-impl"`（自分自身・
    phase は "impl" のまま）、全タスク完了なら `phase: "verify"` /
    `next_command: "/gsd-lite-verify"` にする
 
 ## ターン終了の共通手順（必須・この順で）
 
-1. `.gsd-lite/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
+1. `$MS/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
    やり直しは正直に書く。なければ「なし」「0 回」と書く。`<N>` は**このターンで +1 した後の
    `state.turn`**（= ループが `turn N [...]` と表示する番号、research が turn 1）。
    やり直しの原因が次のターンでも起こり得るなら、**同じ内容を「次への注意」にも書く**）:
@@ -59,10 +79,11 @@ disable-model-invocation: true
 2. `state.json` を更新: `next_command` と `phase` を上記のとおり、`turn` を +1、
    `updated_at` を現在時刻（ISO 8601）に。**turn の +1 を忘れるとループが
    リトライ扱いにするので必ず行う**
-3. PROGRESS.md・state.json をコミットする（タスク本体は手順 4 でコミット済みなので
-   追加コミットでよい。`gsd-lite(impl): <タスクID>完了の申し送りと state 更新`）。
+3. PROGRESS.md・state.json（gsd-control 形では PLAN.md も）をこのリポジトリにコミットする
+   （タスク本体は手順 4 で対象側にコミット済みなので追加コミットでよい。
+   `gsd-lite(impl): <タスクID>完了の申し送りと state 更新`）。
    **state 更新 → commit の順序が重要**: 逆にすると最終 state が未コミットで残り、
    git からの復元時に完了済みタスクを再実行してしまう
-4. 判断に迷ったら推測しない: `.gsd-lite/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
+4. 判断に迷ったら推測しない: `$MS/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
    `next_command: "BLOCKED"` / `phase: "blocked"`（turn は +1）にしたうえで
    同様にコミットして終了する

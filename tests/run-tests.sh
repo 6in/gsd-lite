@@ -50,7 +50,11 @@ mkdir -p "$TESTROOT/bin"
 # ---- スタブ 1: 正常系。実スキル同様、state 更新までコミットする ----
 cat > "$TESTROOT/bin/claude-happy" <<'EOF'
 #!/usr/bin/env bash
-STATE=.gsd-lite/state.json
+# 実スキルと同じ規則で作業場所を解決する: state.json があれば in-repo、なければ制御ブランチ gsd-lite/<slug>
+if [ -f .gsd-lite/state.json ]; then MS=.gsd-lite
+else MS=.gsd-lite/milestones/$(git branch --show-current | sed 's#^gsd-lite/##'); fi
+STATE=$MS/state.json
+TARGET=$(jq -r '.target.path // "."' "$STATE")
 echo "ARGS: $*" >> .gsd-lite/stub-args.log
 cmd=""
 while [ $# -gt 0 ]; do case "$1" in -p) cmd="$2"; shift 2;; *) shift;; esac; done
@@ -61,6 +65,10 @@ case "$cmd" in
   /gsd-lite-plan)     jqup '.phase="impl" | .next_command="/gsd-lite-impl"'; echo 2 > .gsd-lite/tasks_left ;;
   /gsd-lite-impl)
     left=$(( $(cat .gsd-lite/tasks_left) - 1 )); echo "$left" > .gsd-lite/tasks_left
+    if [ "$TARGET" != . ]; then   # 対象が別リポジトリなら、コードは対象側にコミットする（実スキルの契約）
+      echo "code $turn" >> "$TARGET/src.txt"
+      git -C "$TARGET" add -A >/dev/null && git -C "$TARGET" commit -qm "stub code turn $((turn+1))"
+    fi
     [ "$left" -le 0 ] && jqup '.phase="verify" | .next_command="/gsd-lite-verify"' ;;
   /gsd-lite-verify)
     if [ "$(jq -r '.reflect == false' "$STATE")" = true ]; then
@@ -713,6 +721,150 @@ git add -A && git commit -qm "drop reflect skill"
 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
 assert_eq "reflect enabled requires the reflect skill" "$?" "6"
 grep -q 'gsd-lite-reflect/SKILL.md' "$TESTROOT/check.log" && ok "check names the reflect skill" || ng "reflect skill message"
+
+
+make_control_project(){ # make_control_project <dir> — 制御リポジトリ + 対象リポジトリ（<dir>-target を work/tgt に clone）
+  rm -rf "$1" "$1-target"
+  # 対象リポジトリ（リモートなし = ローカル運用）
+  mkdir -p "$1-target"; git -C "$1-target" init -q -b main
+  git -C "$1-target" config user.email t@t; git -C "$1-target" config user.name t
+  echo "# target" > "$1-target/README.md"; git -C "$1-target" add -A; git -C "$1-target" commit -qm "target initial"
+  # 制御リポジトリ
+  mkdir -p "$1/.gsd-lite/hooks" "$1/.gsd-lite/logs" "$1/.gsd-lite/milestones/toy" "$1/.gsd-lite/reflect" "$1/.claude/skills"
+  cd "$1"
+  cp -r "$REPO_DIR/templates/skills/." .claude/skills/
+  git init -q -b main
+  git config user.email t@t; git config user.name t
+  jq --arg url "$1-target" '.targets.tgt = {path: "work/tgt", url: $url, base: "main"}' "$REPO_DIR/templates/config.json" > .gsd-lite/config.json
+  printf '#!/usr/bin/env bash\necho "phase $1 -> $2" >> .gsd-lite/hooks.log\n' > .gsd-lite/hooks/on-phase.sh
+  chmod +x .gsd-lite/hooks/on-phase.sh
+  printf 'work/\n.gsd-lite/logs/\n.gsd-lite/loop.pid\n.gsd-lite/hooks.log\n.gsd-lite/stub-args.log\n.gsd-lite/tasks_left\n' > .gitignore
+  git add -A && git commit -q -m "scaffold (control)"
+  # マイルストーン: 制御ブランチ gsd-lite/toy に state を置き、対象を work/tgt に clone して同名ブランチへ
+  git checkout -q -b gsd-lite/toy
+  jq '.target = {name: "tgt", path: "work/tgt"} | .milestone = "toy" | .phase = "research" | .next_command = "/gsd-lite-research"
+      | .branch = {name: "gsd-lite/toy", base: "main"} | .max_turns = 10
+      | .model = {research: "sonnet-stub", plan: "opus-stub", impl: "sonnet-stub", verify: "opus-stub", reflect: "haiku-stub"}' \
+    "$REPO_DIR/templates/state.json" > .gsd-lite/milestones/toy/state.json
+  git add -A && git commit -q -m "gsd-lite(discuss): toy"
+  git clone -q "$1-target" work/tgt
+  git -C work/tgt config user.email t@t; git -C work/tgt config user.name t
+  git -C work/tgt checkout -q -b gsd-lite/toy
+}
+commit_ms_state(){ # commit_ms_state '<jq filter>' — 制御側の milestones/toy/state.json を更新してコミット
+  t=$(mktemp)
+  jq "$1" .gsd-lite/milestones/toy/state.json > "$t" && mv "$t" .gsd-lite/milestones/toy/state.json
+  git add -A && git commit -qm "configure test"
+}
+
+echo "== Test 29: gsd-control（制御リポジトリ + work/ の対象）フルサイクル =="
+make_control_project "$TESTROOT/ctl29"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "control preflight passes" "$?" "0"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "control cycle DONE" "$?" "0"
+assert_eq "state lives under milestones/<slug>" "$(jq -r .phase .gsd-lite/milestones/toy/state.json)" "done"
+assert_eq "control turns" "$(jq -r .turn .gsd-lite/milestones/toy/state.json)" "6"
+[ ! -e .gsd-lite/state.json ] && ok "no .gsd-lite/state.json in control repo" || ng "stray .gsd-lite/state.json"
+assert_eq "control commits are on the control branch" "$(git branch --show-current)" "gsd-lite/toy"
+assert_eq "control worktree clean" "$(git status --porcelain | wc -l)" "0"
+git ls-files --error-unmatch work/tgt/src.txt >/dev/null 2>&1 && ng "target tree leaked into control git" || ok "target tree not in control git"
+assert_eq "code commits landed in the target" "$(git -C work/tgt rev-list --count main..gsd-lite/toy)" "2"
+assert_eq "target stays on the milestone branch" "$(git -C work/tgt branch --show-current)" "gsd-lite/toy"
+assert_eq "logs are shared per milestone" "$(ls .gsd-lite/logs/toy/turn-*.log | wc -l)" "6"
+assert_eq "turns.jsonl records target commits" "$(jq -r .target_commits .gsd-lite/logs/toy/turns.jsonl | paste -sd,)" "0,0,1,1,0,0"
+assert_eq "turns.jsonl names the target" "$(jq -r .target .gsd-lite/logs/toy/turns.jsonl | sort -u)" "work/tgt"
+assert_eq "turns.jsonl still counts control commits" "$(jq -r .commits .gsd-lite/logs/toy/turns.jsonl | sort -u)" "1"
+assert_eq "phase hooks fired" "$(grep -c '^phase ' .gsd-lite/hooks.log)" "5"
+out=$("$LOOP" --status)
+echo "$out" | grep -q 'mode      : control (.gsd-lite/milestones/toy)' && ok "status shows control mode" || ng "status mode"
+echo "$out" | grep -q 'target    : work/tgt (branch: gsd-lite/toy)' && ok "status shows target branch" || ng "status target"
+echo "$out" | grep -q -- '-- recent target commits (work/tgt) --' && ok "status shows target commits" || ng "status target commits"
+out=$("$LOOP" --watch-once)
+echo "$out" | grep -q 'phase     : done' && ok "watch-once works in control mode" || ng "watch-once control"
+make_project "$TESTROOT/p29legacy"
+out=$("$LOOP" --status)
+echo "$out" | grep -q 'mode      : in-repo' && ok "legacy status shows in-repo" || ng "legacy mode line"
+echo "$out" | grep -q 'target    :' && ng "legacy status shows a target line" || ok "legacy status has no target line"
+jq -e 'has("target")' .gsd-lite/logs/toy/turns.jsonl >/dev/null 2>&1 && ng "legacy turns.jsonl has target fields" || ok "legacy turns.jsonl unchanged"
+
+echo "== Test 30: gsd-control の事前検証 =="
+make_control_project "$TESTROOT/ctl30"
+git checkout -q main
+"$LOOP" --status > "$TESTROOT/status.log" 2>&1
+assert_eq "control repo off a milestone branch is rejected" "$?" "6"
+grep -q 'gsd-lite/<slug>' "$TESTROOT/status.log" && ok "message names the milestone branch" || ng "off-branch message"
+git checkout -q gsd-lite/toy
+mv work/tgt "$TESTROOT/tgt-away"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "missing target stops before turns" "$?" "6"
+grep -q "git clone $TESTROOT/ctl30-target work/tgt" "$TESTROOT/loop-out.log" && ok "missing target suggests the clone from config.json" || ng "clone hint"
+out=$("$LOOP" --status)
+echo "$out" | grep -q 'target    : work/tgt (MISSING' && ok "status flags a missing target" || ng "status missing target"
+mv "$TESTROOT/tgt-away" work/tgt
+git -C work/tgt checkout -q main
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "target on the wrong branch is rejected" "$?" "6"
+grep -q "expects 'gsd-lite/toy'" "$TESTROOT/loop-out.log" && ok "branch mismatch names the expected branch" || ng "branch mismatch message"
+assert_eq "no turn ran on branch mismatch" "$(jq -r .turn .gsd-lite/milestones/toy/state.json)" "0"
+commit_ms_state '.phase="reflect" | .next_command="/gsd-lite-reflect"'
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "reflect phase does not require the milestone branch (after a local merge)" "$?" "0"
+commit_ms_state '.phase="research" | .next_command="/gsd-lite-research"'
+git -C work/tgt checkout -q gsd-lite/toy
+sed -i '/^work\/$/d' .gitignore && git add .gitignore && git commit -qm "drop ignore"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "target not ignored by control git is rejected" "$?" "6"
+grep -q 'gitignore' "$TESTROOT/check.log" && ok "message asks for gitignore" || ng "gitignore message"
+echo 'work/' >> .gitignore && git add .gitignore && git commit -qm "restore ignore"
+commit_ms_state '.target.path="/abs/elsewhere"'
+"$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "absolute target path is rejected" "$?" "6"
+commit_ms_state '.target.path="work/tgt"'
+git -C work/tgt config --unset user.email; git -C work/tgt config --unset user.name; git -C work/tgt config user.useConfigOnly true
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "missing identity in the target is rejected" "$?" "6"
+grep -q "target work/tgt" "$TESTROOT/check.log" && ok "identity message names the target" || ng "target identity message"
+git -C work/tgt config user.email t@t; git -C work/tgt config user.name t
+cd work/tgt
+"$LOOP" --status > "$TESTROOT/status.log" 2>&1
+assert_eq "running inside work/<name> finds no state" "$?" "6"
+cd "$TESTROOT/ctl30"
+
+echo "== Test 31: gsd-control のターン境界（無進捗 → auto-BLOCKED は milestones/<slug>/ に書く） =="
+make_control_project "$TESTROOT/ctl31b"
+commit_ms_state '.retry_max=0'
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-noop" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "control no-progress -> BLOCKED" "$?" "2"
+[ -f .gsd-lite/milestones/toy/BLOCKED.md ] && ok "auto-BLOCKED written under the milestone dir" || ng "BLOCKED.md location"
+assert_eq "auto-BLOCKED committed on the control branch" "$(git show HEAD:.gsd-lite/milestones/toy/state.json | jq -r .next_command)" "BLOCKED"
+grep -q 'milestones/toy/BLOCKED.md' "$TESTROOT/loop-out.log" && ok "BLOCKED message points at the milestone dir" || ng "BLOCKED message path"
+assert_eq "target untouched by the loop" "$(git -C work/tgt rev-list --count main..gsd-lite/toy)" "0"
+
+echo "== Test 32: gsd-control × Codex は対象の Git 管理ディレクトリも add-dir する =="
+make_control_project "$TESTROOT/ctl32"
+mkdir -p .agents/skills && cp -r "$REPO_DIR/templates/skills/." .agents/skills/
+git add -A && git commit -qm "codex skills"
+commit_ms_state '.engine="codex" | .max_turns=1'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "control Codex turn ran" "$?" "3"
+grep -Fxq -- "$(git -C work/tgt rev-parse --absolute-git-dir)" .gsd-lite/stub-args.log && ok "target git dir passed to Codex" || ng "target git dir missing"
+grep -Fxq -- "$(git rev-parse --absolute-git-dir)" .gsd-lite/stub-args.log && ok "control git dir passed to Codex" || ng "control git dir missing"
+grep -q 'milestones/toy/BLOCKED.md' .gsd-lite/stub-args.log && ok "Codex prompt points at the milestone BLOCKED.md" || ng "Codex prompt BLOCKED path"
+
+echo "== Test 33: config.json テンプレートのインストール =="
+install_root="$TESTROOT/cfg install"
+GSD_LITE_INSTALL_ROOT="$install_root" "$REPO_DIR/install.sh" --engine all > "$TESTROOT/install.log" 2>&1
+assert_eq "install with config template" "$?" "0"
+assert_eq "Claude config defaults engine" "$(jq -r .defaults.engine "$install_root/.claude/gsd-lite/templates/config.json")" "claude"
+assert_eq "Codex config defaults engine" "$(jq -r .defaults.engine "$install_root/.codex/gsd-lite/templates/config.json")" "codex"
+assert_eq "OpenCode config defaults engine" "$(jq -r .defaults.engine "$install_root/.config/opencode/gsd-lite/templates/config.json")" "opencode"
+assert_eq "state template default target" "$(jq -r .target.path "$install_root/.claude/gsd-lite/templates/state.json")" "."
+jq -e '.defaults | has("model") and has("research") and has("max_turns") and has("subagents") and has("reflect")' "$REPO_DIR/templates/config.json" >/dev/null && ok "config defaults cover state keys" || ng "config defaults incomplete"
+# discuss が使う「テンプレート × defaults」のマージで state が組めること
+merged=$(jq -s '.[0] * .[1].defaults' "$REPO_DIR/templates/state.json" "$REPO_DIR/templates/config.json")
+assert_eq "template * defaults keeps DISCUSS sentinel" "$(echo "$merged" | jq -r .next_command)" "DISCUSS"
+assert_eq "template * defaults keeps target" "$(echo "$merged" | jq -r .target.path)" "."
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -8,10 +8,29 @@ disable-model-invocation: true
 
 これは無人ターン。マイルストーンの成果全体を検証し、合格なら自動マージまで行う。
 
+## 作業場所の解決（最初に 1 回。全エンジン共通）
+
+```bash
+if [ -f .gsd-lite/state.json ]; then MS=.gsd-lite
+else MS=.gsd-lite/milestones/$(git branch --show-current | sed 's#^gsd-lite/##'); fi
+TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
+```
+
+- `$MS` = マイルストーンディレクトリ。state.json と成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN /
+  PROGRESS / VERIFICATION / BLOCKED）はここ。従来の in-repo 形では `.gsd-lite/` そのもの。
+  制御リポジトリ（gsd-control）形では `.gsd-lite/milestones/<slug>/`（slug は今いる制御ブランチ `gsd-lite/<slug>`）
+- `$TARGET` = コードを書く対象リポジトリ。`.` なら今いるリポジトリ（従来どおり）。`work/<name>` なら
+  gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C $TARGET` /
+  `cd $TARGET` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
+  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`$TARGET/CLAUDE.md` 等が
+  あれば最初に読んで規約に従う。`$TARGET` の中身を制御側に `git add` しない（gitignore 済み）
+- `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）
+
 ## 手順
 
-1. `.gsd-lite/state.json` から `branch.base` / `verify_round` / `verify_round_max` を
-   読み、`git diff <branch.base>...HEAD` でマイルストーン全体の差分を対象にする
+1. `$MS/state.json` から `branch.base` / `verify_round` / `verify_round_max` を
+   読み、`git -C $TARGET diff <branch.base>...HEAD` でマイルストーン全体の差分（対象リポジトリのコード）を
+   対象にする。`$TARGET/CLAUDE.md` / `AGENTS.md` があれば規約もレビュー観点に含める
 2. `REQUIREMENTS.md` の受け入れ基準・PLAN.md の完了基準と突き合わせて検証する:
    - **コードレビュー**: バグ / 設計の歪み / テストの妥当性（テストが完了基準を
      実際に検証しているか）/ 要件の取りこぼし
@@ -34,8 +53,9 @@ disable-model-invocation: true
 3. 結果で分岐:
 
    **合格の場合**
-   - `.gsd-lite/VERIFICATION.md` に検証結果（観点・確認したこと・残留リスク）を書いてコミット
-   - `git remote get-url origin` で**リモートの有無を判定**して分岐:
+   - `$MS/VERIFICATION.md` に検証結果（観点・確認したこと・残留リスク）を書いてコミット
+   - `git -C $TARGET remote get-url origin` で**対象リポジトリのリモートの有無を判定**して分岐
+     （以下の git / gh / glab はすべて対象側で実行する: `git -C $TARGET ...`、`cd $TARGET && gh ...`）:
 
    **(a) リモートなし（ローカルのみ）→ ベースブランチへ自動マージ**
    - `git checkout <branch.base>` → `git merge --no-ff gsd-lite/<slug>`
@@ -59,7 +79,8 @@ disable-model-invocation: true
         -o merge_request.target=<branch.base> -o merge_request.title="<要約>"`
        — push 出力に MR の URL が表示されるのでそれを記録する
    - MR/PR の本文には受け入れ基準の達成状況と VERIFICATION.md の要約を書き、
-     末尾に実際の実行エンジン名（Claude Code / Codex / OpenCode）を記載する
+     末尾に実際の実行エンジン名（Claude Code / Codex / OpenCode）を記載する。
+     gsd-control 形では成果物が対象 MR に含まれないので、制御リポジトリの `$MS/` の場所も本文に書く
    - 作成成功: MR/PR の URL を VERIFICATION.md と PROGRESS.md に記録。
      ブランチはそのまま。**完了遷移**（下記）へ（マージは人間 / CI）
    - **push の成否を必ず確認する**（MR 用 push・最終 state コミット後の再 push とも）。
@@ -78,7 +99,7 @@ disable-model-invocation: true
    - `reflect: false` なら従来通り `phase: "done"` / `next_command: "DONE"`
 
    **指摘ありの場合**
-   - 修正タスクを `.gsd-lite/PLAN.md` の Tasks 末尾に `- [ ] F1: ...` 形式で追記
+   - 修正タスクを `$MS/PLAN.md` の Tasks 末尾に `- [ ] F1: ...` 形式で追記
      （完了基準・対象ファイル付き）
    - `verify_round` を +1 する
    - `verify_round <= verify_round_max` なら `phase: "impl"` /
@@ -87,7 +108,7 @@ disable-model-invocation: true
 
 ## ターン終了の共通手順（必須・この順で）
 
-1. `.gsd-lite/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
+1. `$MS/PROGRESS.md` に追記（**固定項目**。reflect フェーズの材料になるので、想定外と
    やり直しは正直に書く。なければ「なし」「0 回」と書く。`<N>` は**このターンで +1 した後の
    `state.turn`**（= ループが `turn N [...]` と表示する番号、research が turn 1）。
    やり直しの原因が次のターンでも起こり得るなら、**同じ内容を「次への注意」にも書く**）:
@@ -102,13 +123,15 @@ disable-model-invocation: true
    `updated_at` を現在時刻（ISO 8601）に。**turn の +1 を忘れるとループが
    リトライ扱いにするので必ず行う**
 3. 成果物・PROGRESS.md・state.json を**まとめて git commit**（`gsd-lite(verify): <要約>`。
-   (a) ローカルマージ後はベースブランチ上でコミット。(b) リモート運用ではマイルストーン
+   in-repo 形: (a) ローカルマージ後はベースブランチ上でコミット。(b) リモート運用ではマイルストーン
    ブランチ上でコミットして再 push する — MR に最終 state が含まれる。
    **push 後もマイルストーンブランチに残ったまま終了すること**。checkout でベースに
    移ると作業ツリーの state.json がベースの古い内容に置き換わり、ループが誤動作する。
-   ベースへの復帰は次のマイルストーンの discuss 冒頭が行う）。
+   ベースへの復帰は次のマイルストーンの discuss 冒頭が行う。
+   gsd-control 形: state と成果物は制御リポジトリ（今いる場所、制御ブランチ `gsd-lite/<slug>`）に
+   コミットするだけ。対象側の再 push は不要で、(b) では対象をマイルストーンブランチに残す）。
    **state 更新 → commit の順序が重要**: 逆にすると最終 state が未コミットで残り、
    git からの復元時に完了済みフェーズを再実行してしまう
-4. 判断に迷ったら推測しない: `.gsd-lite/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
+4. 判断に迷ったら推測しない: `$MS/BLOCKED.md` に状況・質問・選択肢+推奨を書き、
    `next_command: "BLOCKED"` / `phase: "blocked"`（turn は +1）にしたうえで
    同様にコミットして終了する
