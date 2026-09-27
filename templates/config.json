@@ -10,7 +10,7 @@
     "reflect": true,
     "max_turns": 60,
     "retry_max": 2,
-    "verify_round_max": 2,
+    "verify_round_max": 3,
     "research": {
       "targets": ["similar_oss", "official_docs", "local_projects"],
       "local_search_paths": ["~/workspaces"]

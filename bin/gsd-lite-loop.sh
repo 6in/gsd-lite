@@ -10,6 +10,8 @@
 #   gsd-lite-loop.sh --stop     # 現在のターン終了後に中断を依頼
 #   gsd-lite-loop.sh --watch    # 進捗・タスク・実行中ログを数秒ごとに再描画する簡易 TUI（q で終了）
 #   gsd-lite-loop.sh --watch-once # --watch の 1 画面ぶんを出力して終了（非対話・テスト用）
+#   gsd-lite-loop.sh --where    # 作業場所の解決結果（mode / milestone_dir / state / target / slug）を key=value で表示。
+#                               # スキルが最初に 1 回呼び、以降はその値をリテラルで使う（Bash ツールはコール間で変数を保持しない）
 #
 # 環境変数:
 #   GSD_LITE_ENGINE            claude / codex / opencode（未指定時 state.engine、旧 state は claude）
@@ -24,6 +26,10 @@
 #   GSD_LITE_OPENCODE_MODEL    OpenCode の全フェーズ共通モデル（provider/model 形式。state.opencode.model より優先）
 #   GSD_LITE_CLAUDE_BIN        claude バイナリの上書き（テスト用スタブ差し込み）
 #   GSD_LITE_PERMISSION_MODE   claude -p の --permission-mode（デフォルト acceptEdits）
+#   GSD_LITE_CLAUDE_TRUST_CHECK auto / skip（デフォルト auto）。Claude を使うフェーズがあれば、このディレクトリが
+#                              Claude Code で trust 済み（~/.claude.json の projects[<cwd>].hasTrustDialogAccepted）か
+#                              起動前に確認する。未 trust だと claude -p は .claude/settings.json の allowlist を全部
+#                              無視するので、無人ターンが権限拒否で無進捗になる
 #   GSD_LITE_CLAUDE_TOKEN_VARS 任意。Claude のターンで CLAUDE_CODE_OAUTH_TOKEN に使うトークンを
 #                              保持している環境変数「名」の空白区切りリスト（例 "TOK_ORG_A TOK_ORG_B"）。
 #                              設定すると Claude のターンごとにラウンドロビンで切り替える
@@ -240,6 +246,7 @@ check_config() {
   check_target
   check_codex_sandbox
   check_claude_tokens
+  check_claude_trust
 }
 
 check_target() {
@@ -354,6 +361,54 @@ check_codex_sandbox() {
   fi
 }
 
+where() { # 作業場所の解決結果を key=value で表示（スキル向け。値はそのままリテラルパスとして使える）
+  require_state
+  echo "mode=$MODE"
+  echo "milestone_dir=$MS_DIR"
+  echo "state=$STATE"
+  echo "target=$TARGET"
+  echo "slug=${SLUG:-$(sget '.milestone // empty')}"
+}
+
+claude_config_file() { printf '%s\n' "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"; }
+
+claude_trusted() { # 0=trust 済み / 1=未 trust / 2=判定できない（設定ファイルなし）
+  local cfg
+  cfg=$(claude_config_file)
+  [ -f "$cfg" ] || return 2
+  [ "$(jq -r --arg d "$PWD" '.projects[$d].hasTrustDialogAccepted // false' "$cfg" 2>/dev/null)" = true ]
+}
+
+check_claude_trust() {
+  # claude -p は、そのディレクトリで trust ダイアログを受け入れていないと .claude/settings.json の
+  # permissions.allow を「Ignoring N permissions.allow entries ... this workspace has not been trusted」として
+  # 全部無視する。無人ターンでは権限拒否に応答できないので、起動前に止めて対処を案内する
+  local uses_claude=0 p
+  [ "${GSD_LITE_CLAUDE_TRUST_CHECK:-auto}" = skip ] && return 0
+  for p in $PHASES; do
+    [ "$(engine_for "$p")" = claude ] && uses_claude=1
+  done
+  [ "$uses_claude" -eq 1 ] || return 0
+  claude_trusted
+  case $? in
+    0) return 0 ;;
+    2) echo "gsd-lite: WARN $(claude_config_file) not found — cannot verify that this workspace is trusted by Claude Code" >&2; return 0 ;;
+  esac
+  die "this workspace is not trusted by Claude Code, so claude -p will ignore every permissions.allow entry in .claude/settings.json (unattended turns then stall on permission prompts).
+  対処（どちらか）: (a) このディレクトリで対話の claude を一度起動して trust ダイアログを受け入れる（bypass モードで起動した場合はダイアログが出ないので (b)）
+              (b) claude を終了した状態で: jq --arg d \"$PWD\" '.projects[\$d].hasTrustDialogAccepted = true' $(claude_config_file) > /tmp/claude.json && mv /tmp/claude.json $(claude_config_file)
+  この検証を飛ばすには GSD_LITE_CLAUDE_TRUST_CHECK=skip"
+}
+
+trust_summary() { # --status / --check 用の 1 行
+  claude_trusted
+  case $? in
+    0) echo "trust     : accepted (Claude Code allowlist active)" ;;
+    1) echo "trust     : NOT accepted — claude -p ignores .claude/settings.json allowlist (see --check)" ;;
+    *) echo "trust     : unknown ($(claude_config_file) not found)" ;;
+  esac
+}
+
 token_summary() { # トークン切り替えの状態 1 行（値は出さない。未設定でも出して気づけるようにする）
   if [ -n "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ]; then
     # 表示だけなので値の検証はしない（検証は --check / 起動時）
@@ -391,6 +446,7 @@ status() {
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
   echo "subagents : $(sget '.subagents // "auto"')"
   token_summary
+  trust_summary
   if [ -f "$STOPFILE" ]; then
     echo "stop      : requested (cleared on next start)"
   else
@@ -491,6 +547,7 @@ case "${1:-}" in
     echo "gsd-lite: stop requested; the active turn will finish before stopping"
     exit 0 ;;
   --status) status; exit 0 ;;
+  --where) command -v jq >/dev/null || die "jq is required"; where; exit 0 ;;
   --watch) command -v jq >/dev/null || die "jq is required"; watch; exit 0 ;;
   --watch-once) command -v jq >/dev/null || die "jq is required"; require_state; watch_render; exit 0 ;;
   --check)
@@ -498,10 +555,11 @@ case "${1:-}" in
     require_state
     check_config
     token_summary
+    trust_summary
     echo "gsd-lite: execution configuration ready"
     exit 0 ;;
   "") ;;
-  *) die "unknown option: $1 (supported: --status, --watch, --check, --stop)" ;;
+  *) die "unknown option: $1 (supported: --status, --watch, --watch-once, --where, --check, --stop)" ;;
 esac
 
 command -v jq >/dev/null || die "jq is required"
@@ -523,6 +581,7 @@ flock -n 9 || die "loop already running (lock: $LOCKFILE)"
 # 必ず排他取得後に消す。二重起動の失敗で稼働中ループへの中断依頼を消さない。
 rm -f "$STOPFILE" || die "cannot clear $STOPFILE"
 echo $$ > "$PIDFILE"
+echo "gsd-lite: start $(date -Iseconds) pid $$ mode=$MODE${SLUG:+ slug=$SLUG}$([ "$TARGET" = . ] || echo " target=$TARGET") (append to logs/loop.log with >> so restarts keep earlier lines)"
 trap 'rm -f "$PIDFILE"' EXIT
 trap 'finish 130' INT TERM
 

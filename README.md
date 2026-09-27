@@ -36,7 +36,12 @@ claude
 ```bash
 gsd-lite-loop.sh --status   # 1 回表示
 gsd-lite-loop.sh --watch    # 簡易 TUI: 状態・PLAN のタスク・実行中ターンのログを数秒ごとに再描画
+gsd-lite-loop.sh --where    # 作業場所（mode / milestone_dir / state / target / slug）を key=value で表示
 ```
+
+`--where` はスキルが最初に 1 回呼び、以降のコマンドではその値をリテラルのパスとして使う
+（Claude Code の Bash ツールはコール間でシェル変数を保持しないため、`MS=...` と変数に入れてから使う
+書き方は失敗する）。人間が state と成果物の場所を確かめるときにも使える。
 
 `--watch` は bash と jq だけで動く読み取り専用の画面で、`q` で終了、`s` で `--stop` と同じ中断依頼、
 `+` / `-` でログの表示行数を増減する。間隔は `GSD_LITE_WATCH_INTERVAL`（既定 3 秒）、
@@ -396,7 +401,16 @@ gsd-lite-loop.sh --status   # フェーズ別の実行先・モデルと進捗�
 通常のループ起動でも実行前チェックを行う。後半で使うCLIやスキルが不足していれば
 最初のターンより前に終了コード6で停止する。認証・通信の疎通確認は含まない。
 
-チェックには次も含まれる（どちらも見落とすと「全ターン無進捗 → auto-BLOCKED」になる）。
+チェックには次も含まれる（いずれも見落とすと「全ターン無進捗 → auto-BLOCKED」になる）。
+
+- **Claude Code の trust**: Claude を使うフェーズがあれば、このディレクトリが trust 済み
+  （`~/.claude.json` の `projects["<絶対パス>"].hasTrustDialogAccepted`）か確認する。未 trust だと
+  `claude -p` は `.claude/settings.json` の allowlist を**すべて無視**し（ログ冒頭に
+  「Ignoring N permissions.allow entries ... this workspace has not been trusted」）、WebSearch や
+  テスト実行が権限拒否になる。対話の `claude` を bypass モードで起動した場合はダイアログが出ず
+  未 trust のまま残る。対処は、そのディレクトリで対話の `claude` を起動して trust を受け入れるか、
+  claude を終了した状態で上のフラグを true にする。`GSD_LITE_CLAUDE_TRUST_CHECK=skip` で省略可。
+  `--status` の `trust` 行でも確認できる
 
 - **git 識別**: `git var GIT_COMMITTER_IDENT` が通ること。ループ自身も各ターンも
   state.json をコミットするため、`user.name` / `user.email` 未設定では進捗を残せない
@@ -420,6 +434,8 @@ gsd-lite-loop.sh --stop
 実行中のタスクはコミット・後処理まで完了させ、次のタスクを開始する前に中断する。
 `--stop` 自体は依頼を記録してすぐ終了する。停止したかは
 `gsd-lite-loop.sh --status` の `loop` と `stop` を確認する（`--watch` 画面の `s` キーでも同じ依頼ができる）。
+デタッチ起動のログは `>> .gsd-lite/logs/loop.log` のように**追記**で取る（`>` だと再開のたびに前回分が消える。
+ループは起動時に日時と pid の開始行を出すので、追記でも区切りが分かる）。
 
 通常と同じコマンドで、保存された次のタスクから再開する。
 
@@ -508,6 +524,10 @@ subagents / reflect / max_turns / retry_max / verify_round_max / research）。
 5. **完了後の制御側**: `gsd-lite/<slug>` ブランチをどう扱うかは人間が選ぶ。制御 main にマージして
    マイルストーンの記録を残す / reflect だけ取り込む / 放置のいずれでもよい。
    マイルストーンごとにディレクトリが分かれているので、複数人のブランチをマージしても衝突しない
+
+試用（2026-09-26、todo-cli で 15 ターン完走）で分かった注意: 制御リポジトリのディレクトリも Claude Code の trust を
+受け入れておく（未 trust だと allowlist が無視される。`--check` が止める）。スキルは `--where` の出力をリテラルパスで使う。
+`verify_round_max` の既定は 3（指摘が出るたび 1 ラウンド消費する運用で 2 は足りず、BLOCKED で人間待ちになった）。
 
 ### ループの事前検証（gsd-control で追加されるもの）
 

@@ -37,6 +37,9 @@ disable-model-invocation: true
 | 状況 | 形 | `$MS`（state と成果物） | `$TARGET`（コードを書くリポジトリ） |
 |---|---|---|---|
 | `.gsd-lite/state.json` がある | **in-repo**（従来） | `.gsd-lite` | `.`（今いるリポジトリ） |
+
+（既存マイルストーンの場所は `gsd-lite-loop.sh --where` でも表示できる。以下の `$MS` / `$TARGET` は
+「ここにその値をリテラルで書く」印で、シェル変数としては使わない — Bash ツールはコール間で変数を保持しない）
 | なくて `.gsd-lite/config.json` がある | **gsd-control**（制御リポジトリ） | `.gsd-lite/milestones/<slug>` | `work/<name>`（config.json の `targets`） |
 | どちらもない | 未セットアップ | `/gsd-lite-init` を案内して終了 | |
 
@@ -111,7 +114,9 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
   新しく聞けるようになった質問で次のラウンドを組む
 - 別の未回答質問に依存する質問は、同じラウンドに**入れない**（後のラウンドへ）
 
-初期フロンティアの種（この 5 観点から始める）:
+初期フロンティアの種（この 5 観点から始める。加えて**堅牢性の受け入れ基準を入れるか**を 1 問聞く —
+例「どの入力・出力状態でもトレースバックを出さず、既存データを失わない」。入れるなら plan が初回タスクに
+含め、入れないなら verify は該当指摘を残留リスクに留めて差し戻さない）:
 スコープ境界（やらないことの確認）/ 受け入れ基準 / 技術選定 /
 既存コードとの整合 / エッジケース・異常系の扱い
 
@@ -199,11 +204,17 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
      選択と違う場合はその変数を外した起動コマンドを使う（黙って無視しない）。
    - 決定を DECISIONS.md に記録し、state の `engine` / `phase_engines` を更新。
      同じ環境で `gsd-lite-loop.sh --check` を実行し、不足があれば起動せず解消する。
-     このチェックは CLI / スキル配置 / git 識別 / Codex sandbox の実効性の検証で、
+     このチェックは CLI / スキル配置 / git 識別 / Codex sandbox の実効性 / **Claude Code の trust** の検証で、
      認証や外部サービス疎通の保証ではない。Codex sandbox の検証で止まった場合は
      表示された対処（`GSD_LITE_CODEX_SANDBOX=danger-full-access` で起動、カーネル設定、
      impl / verify を Claude に切り替え）のどれにするかを AUQ で選んでもらい、
      環境変数で起動する場合は DECISIONS.md に記録して起動コマンドにも付ける。
+     **trust の検証で止まった場合**（「this workspace is not trusted by Claude Code」）: このディレクトリが
+     Claude Code で trust 済みでないと、無人ターンの `claude -p` は `.claude/settings.json` の allowlist を
+     すべて無視し、WebSearch / WebFetch / テスト実行などが権限拒否になる（対話の起動を bypass モードで
+     行うとダイアログが出ず未 trust のまま残る）。対処は表示どおり: 別ターミナルでこのディレクトリの `claude` を
+     対話起動して trust を受け入れるか、claude を終了した状態で `~/.claude.json` の
+     `projects["<絶対パス>"].hasTrustDialogAccepted` を true にする。解消してから再度 `--check`
 
 5. **マイルストーンブランチ作成**（base の整理は手順 0-a で済んでいる前提）:
    - gsd-control 形: 制御側ブランチ `gsd-lite/<slug>` は「作業場所の判定」で作成済み。ここでは
@@ -230,7 +241,8 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
      いじると、git 復元時に要件確定済みなのに DISCUSS へ戻ってしまう
 6. 最後の AUQ で「今すぐループを起動するか」「起動する場合、このセッションで
    進捗を見守るか」を確認する:
-   - **起動する**: `setsid gsd-lite-loop.sh > .gsd-lite/logs/loop.log 2>&1 &` で
+   - **起動する**: `setsid gsd-lite-loop.sh >> .gsd-lite/logs/loop.log 2>&1 &` で（`>>` で追記。`>` だと
+     再起動のたびに前回のループログが消える）
      デタッチ起動し、`gsd-lite-loop.sh --status` などの監視コマンドを提示して
      **即座に手を離す**。以後このセッションでログをポーリングしない
    - **見守る**: バックグラウンドのサブエージェントを 1 体起動する。指示は

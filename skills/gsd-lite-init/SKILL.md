@@ -127,7 +127,17 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
 5. **.gitignore**: `.gsd-lite/logs/` と `.gsd-lite/loop.pid` を追記（なければ作成）
 6. **コミット**: 現在のブランチ（= 以後の base ブランチ）に
    `gsd-lite: scaffold` としてコミット
-7. **案内**: 「次は同じセッションで `/gsd-lite-discuss <やりたいこと>`」と伝えて終了
+7. **Claude Code の trust 確認**（Claude を使う場合）: 無人ターンの `claude -p` は、このディレクトリが trust 済み
+   でないと `.claude/settings.json` の allowlist を**すべて無視**する（ログ冒頭に「Ignoring N permissions.allow
+   entries ... this workspace has not been trusted」）。対話の `claude` を bypass モードで起動した場合はダイアログが
+   出ず未 trust のまま残るので、ここで確認する:
+   ```bash
+   jq --arg d "$PWD" '.projects[$d].hasTrustDialogAccepted // false' ~/.claude.json
+   ```
+   `true` でなければユーザーに伝える: 「別ターミナルでこのディレクトリの `claude` を対話起動して trust を受け入れる。
+   または claude を終了した状態で `~/.claude.json` の `projects["<絶対パス>"].hasTrustDialogAccepted` を true にする」。
+   `gsd-lite-loop.sh --check` も同じ検証を行い、未 trust なら起動しない
+8. **案内**: 「次は同じセッションで `/gsd-lite-discuss <やりたいこと>`」と伝えて終了
 
 ## 手順 C — gsd-control 形（制御リポジトリを生成する）
 
@@ -167,7 +177,8 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
   対して適用）。無人ターンは制御側のカレントから `git -C work/<name> ...` を実行するので、
   サブコマンド単位の許可では足りない
 - **C4. コミット**: 制御側の現在のブランチ（通常 main = 制御側の base）に `gsd-lite: scaffold (control)`
-- **C5. 案内**: 「次は同じセッションで `/gsd-lite-discuss <やりたいこと>`。対象の CLAUDE.md /
+- **C5. trust 確認と案内**: 手順 7 と同じ trust 確認を行う（制御リポジトリのディレクトリが対象）。
+  そのうえで「次は同じセッションで `/gsd-lite-discuss <やりたいこと>`。対象の CLAUDE.md /
   AGENTS.md は自動では読まれないので、discuss / plan / impl が `work/<name>/CLAUDE.md` を明示的に読む」と伝える。
   ループは**制御リポジトリのルートで**制御ブランチ `gsd-lite/<slug>` にいる状態で起動する
   （`work/<name>` の中で起動すると state が見つからず終了コード 6）

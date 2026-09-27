@@ -10,21 +10,34 @@ disable-model-invocation: true
 
 ## 作業場所の解決（最初に 1 回。全エンジン共通）
 
-```bash
-if [ -f .gsd-lite/state.json ]; then MS=.gsd-lite
-else MS=.gsd-lite/milestones/$(git branch --show-current | sed 's#^gsd-lite/##'); fi
-TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
+最初の Bash で **`gsd-lite-loop.sh --where` を 1 回だけ実行**し、出力を読む:
+
 ```
+mode=control            # in-repo | control
+milestone_dir=.gsd-lite/milestones/<slug>   # 以下「$MS」と書く場所。in-repo 形では .gsd-lite
+state=.gsd-lite/milestones/<slug>/state.json
+target=work/<name>      # 以下「$TARGET」と書く場所。in-repo 形では .
+slug=<slug>
+```
+
+**以降のコマンドでは、この出力の値をそのままリテラルで書く**（例: `cat .gsd-lite/milestones/todo-mvp/PLAN.md`、
+`git -C work/todo-cli status`）。本文の `$MS` / `$TARGET` は「ここに --where の値を書く」という印であり、
+シェル変数として使わない。Bash ツールはコール間でシェル変数を保持せず、環境によってはコマンド書き換えの
+フックが `$VAR` を空にするため、`MS=...; ...` と変数に入れてから使う書き方は失敗する。
 
 - `$MS` = マイルストーンディレクトリ。state.json と成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN /
   PROGRESS / VERIFICATION / BLOCKED）はここ。従来の in-repo 形では `.gsd-lite/` そのもの。
   制御リポジトリ（gsd-control）形では `.gsd-lite/milestones/<slug>/`（slug は今いる制御ブランチ `gsd-lite/<slug>`）
 - `$TARGET` = コードを書く対象リポジトリ。`.` なら今いるリポジトリ（従来どおり）。`work/<name>` なら
-  gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C $TARGET` /
-  `cd $TARGET` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
-  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`$TARGET/CLAUDE.md` 等が
-  あれば最初に読んで規約に従う。`$TARGET` の中身を制御側に `git add` しない（gitignore 済み）
-- `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）
+  gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C <target>` /
+  `cd <target>` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
+  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`<target>/CLAUDE.md` 等が
+  あれば最初に読んで規約に従う。`<target>` の中身を制御側に `git add` しない（gitignore 済み）
+- `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）。
+  一時ファイル（プローブ用スクリプト等）が必要なら `/tmp` ではなく `.gsd-lite/logs/<slug>/scratch/` に置く
+  （`/tmp` への書き込みは allowlist 外で権限拒否になる。logs/ は gitignore 済み）
+- 環境メモ: lean-ctx 等の MCP ツールが未接続でも通常のツールで進めてよい。未接続であることは
+  PROGRESS の「想定外」に書かなくてよい（毎ターン同じ行が並ぶだけで振り返りの材料にならない）
 
 ## 手順
 
@@ -36,6 +49,16 @@ TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
      実際に検証しているか）/ 要件の取りこぼし
    - **セキュリティチェック**: 入力検証 / 認可 / 秘密情報のハードコード /
      インジェクション / 依存の危険な使い方
+   - **round 1 で堅牢性の格子を一括プローブし、round 2 以降は回帰確認だけにする**: round 1 で
+     入力経路（argv の各引数 / 環境変数 / ファイル内容 / 標準入力）× 出力経路（stdout / stderr の fd:
+     パイプ閉鎖・fd 閉鎖・満杯・読み取り専用・エンコード不能）× 例外の親クラス（`OSError` / `ValueError` /
+     `RecursionError` / `None` オブジェクト）の格子を立て、該当する面を全部その回で試す。round 2 以降は
+     「round 1 の格子の再確認 + 前ラウンドの修正差分の回帰」だけを行い、新しいクラスの探索はしない
+     （探索の深さが毎ラウンド 1 段ずつ増えると、指摘が小出しになって修正ラウンドと BLOCKED を生む）
+   - **堅牢性の指摘は要件と区別する**: REQUIREMENTS / DECISIONS に堅牢性の受け入れ基準（例「どの入力・出力
+     状態でもトレースバックを出さず、既存データを失わない」）が**ない**場合、受け入れ基準を満たしている成果に
+     対する堅牢性の指摘は、データ損失や誤動作を伴うものだけを差し戻し、それ以外は VERIFICATION.md の
+     「残留リスク」に書いて合格にする（verify が事実上の要件追加をしない）
    - **入力クラスの境界は一括で洗う**（同型の指摘をラウンドをまたいで小出しにしない）:
      1 つの入力経路（引数 / 環境変数 / データファイル / 標準入力）に問題を見つけたら、
      同じ経路の**クラス全体**を同じラウンドで試す。例: 制御文字なら C0 / DEL / C1 /
@@ -100,7 +123,9 @@ TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
 
    **指摘ありの場合**
    - 修正タスクを `$MS/PLAN.md` の Tasks 末尾に `- [ ] F1: ...` 形式で追記
-     （完了基準・対象ファイル付き）
+     （完了基準・対象ファイル付き）。**期待結果は 1 つの表にまとめる**（条件 → exit / stdout / stderr を
+     1 行ずつ）。完了基準の本文とテストの記述はその表を参照するだけにし、exit コード等を 2 か所に書かない
+     （2 か所に書くと矛盾して impl が判断を迫られる）。例外処理は親クラスで書く（plan と同じ規則）
    - `verify_round` を +1 する
    - `verify_round <= verify_round_max` なら `phase: "impl"` /
      `next_command: "/gsd-lite-impl"`（差し戻し）

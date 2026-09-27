@@ -33,6 +33,10 @@
 > `target_commits` を加える。スキルは冒頭で `$MS`（マイルストーンディレクトリ）と `$TARGET` を解決し、
 > 対象の CLAUDE.md / AGENTS.md を明示的に読む（制御側から起動するので自動では読まれない）。
 > 完了後の制御側ブランチの扱い（制御 main へマージ / reflect だけ取り込む / 放置）は人間が選ぶ。
+> 試用（2026-09-26、todo-cli 15 ターン完走）の反映: `--where`（作業場所を key=value で表示。スキルはこれを 1 回呼び
+> リテラルパスで使う — Bash ツールはコール間で変数を保持しない）、`--check` / `--status` に Claude Code の trust 検証
+> （未 trust だと claude -p が allowlist を全部無視する）、起動時の開始行（loop.log は `>>` で追記）、
+> `verify_round_max` の既定 3、verify の round 1 格子プローブ / plan の採否表 / 例外の親クラス指定。
 > 詳細は [README の制御リポジトリ方式](../README.md#制御リポジトリ方式gsd-control)。
 > 詳細なインストール・移行・権限設定は [README の Codex 手順](../README.md#codex-で使う) /
 > [OpenCode 手順](../README.md#opencode-で使う) を参照。
@@ -207,7 +211,7 @@ gsd-lite/
   "max_turns": 60,
   "retry_max": 2,
   "verify_round": 0,
-  "verify_round_max": 2,
+  "verify_round_max": 3,
   "model": {
     "research": "claude-fable-5-1",
     "plan":   "claude-fable-5-1",
@@ -345,7 +349,7 @@ AskUserQuestion（AUQ）で実装したもの。原典の「番号付き質問+�
 5. `phase: "research"` / `next_command: "/gsd-lite-research"` に更新
 6. 最後の AUQ で「今すぐループを起動するか」を確認する。
    - **起動する**: discuss セッション自身が `setsid gsd-lite-loop.sh
-     > .gsd-lite/logs/loop.log 2>&1 &` でデタッチ起動し、監視コマンド
+     >> .gsd-lite/logs/loop.log 2>&1 &` でデタッチ起動し、監視コマンド
      （`tail -f` / `jq` での state 確認）を提示して**即座に手を離す**。
      起動後にログをポーリングしない（このセッションのコンテキストが膨らみ、
      毎ターン新規コンテキストにした意味が消える。moonlighting の
@@ -627,7 +631,7 @@ discuss セッション自身がデタッチ起動してくれる**（コピペ�
 自分で起動する場合は:
 
 ```bash
-setsid gsd-lite-loop.sh > .gsd-lite/logs/loop.log 2>&1 &
+setsid gsd-lite-loop.sh >> .gsd-lite/logs/loop.log 2>&1 &
 ```
 
 → research → plan → impl ×N → verify → 自動マージ → DONE が無人で進む。

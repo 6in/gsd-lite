@@ -9,6 +9,8 @@ REPO_DIR=$(dirname "$(dirname "$LOOP")")
 unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL GSD_LITE_CLAUDE_TOKEN_VARS CLAUDE_CODE_OAUTH_TOKEN
 # スタブは `codex sandbox` を実装しないので、sandbox probe は専用テスト以外で飛ばす。
 export GSD_LITE_CODEX_SANDBOX_PROBE=skip
+# テスト用ディレクトリは Claude Code の trust を受けていないので、trust 検証は専用テスト以外で飛ばす。
+export GSD_LITE_CLAUDE_TRUST_CHECK=skip
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 ng(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -865,6 +867,68 @@ jq -e '.defaults | has("model") and has("research") and has("max_turns") and has
 merged=$(jq -s '.[0] * .[1].defaults' "$REPO_DIR/templates/state.json" "$REPO_DIR/templates/config.json")
 assert_eq "template * defaults keeps DISCUSS sentinel" "$(echo "$merged" | jq -r .next_command)" "DISCUSS"
 assert_eq "template * defaults keeps target" "$(echo "$merged" | jq -r .target.path)" "."
+
+
+echo "== Test 34: --where は作業場所を key=value で出す（in-repo / control） =="
+make_project "$TESTROOT/w34"
+out=$("$LOOP" --where)
+assert_eq "where exits 0" "$?" "0"
+assert_eq "where in-repo" "$out" "$(printf 'mode=repo\nmilestone_dir=.gsd-lite\nstate=.gsd-lite/state.json\ntarget=.\nslug=toy')"
+make_control_project "$TESTROOT/w34c"
+out=$("$LOOP" --where)
+assert_eq "where control" "$out" "$(printf 'mode=control\nmilestone_dir=.gsd-lite/milestones/toy\nstate=.gsd-lite/milestones/toy/state.json\ntarget=work/tgt\nslug=toy')"
+git checkout -q main
+"$LOOP" --where > "$TESTROOT/where.log" 2>&1
+assert_eq "where off a milestone branch fails" "$?" "6"
+git checkout -q gsd-lite/toy
+"$LOOP" --bogus > "$TESTROOT/where.log" 2>&1
+grep -q -- '--where' "$TESTROOT/where.log" && ok "usage lists --where" || ng "usage missing --where"
+
+echo "== Test 35: Claude Code の trust 検証 =="
+fake_home="$TESTROOT/home35"; mkdir -p "$fake_home"
+make_project "$TESTROOT/t35"
+proj="$PWD"
+# 設定ファイルなし → 判定できないので WARN のみで通す
+HOME="$fake_home" GSD_LITE_CLAUDE_TRUST_CHECK=auto GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "no ~/.claude.json -> check passes with WARN" "$?" "0"
+grep -q 'WARN.*cannot verify' "$TESTROOT/check.log" && ok "warns when trust cannot be verified" || ng "missing trust WARN"
+grep -q 'trust     : unknown' "$TESTROOT/check.log" && ok "check shows trust unknown" || ng "trust unknown line"
+# 未 trust → 起動前に止める
+jq -n --arg d "$proj" '{projects: {($d): {hasTrustDialogAccepted: false}}}' > "$fake_home/.claude.json"
+HOME="$fake_home" GSD_LITE_CLAUDE_TRUST_CHECK=auto GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "untrusted workspace fails --check" "$?" "6"
+grep -q 'not trusted by Claude Code' "$TESTROOT/check.log" && ok "untrusted message" || ng "untrusted message missing"
+grep -q 'hasTrustDialogAccepted' "$TESTROOT/check.log" && ok "remedy names the flag" || ng "remedy missing"
+HOME="$fake_home" GSD_LITE_CLAUDE_TRUST_CHECK=auto GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "untrusted workspace stops before the first turn" "$?" "6"
+assert_eq "no turn ran untrusted" "$(jq -r .turn .gsd-lite/state.json)" "0"
+out=$(HOME="$fake_home" "$LOOP" --status)
+echo "$out" | grep -q 'trust     : NOT accepted' && ok "status shows NOT accepted" || ng "status trust line"
+# trust 済み → 通る
+jq -n --arg d "$proj" '{projects: {($d): {hasTrustDialogAccepted: true}}}' > "$fake_home/.claude.json"
+HOME="$fake_home" GSD_LITE_CLAUDE_TRUST_CHECK=auto GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "trusted workspace passes --check" "$?" "0"
+grep -q 'trust     : accepted' "$TESTROOT/check.log" && ok "check shows trust accepted" || ng "trust accepted line"
+# CLAUDE_CONFIG_DIR を尊重する
+mkdir -p "$TESTROOT/cfgdir35"; jq -n --arg d "$proj" '{projects: {($d): {hasTrustDialogAccepted: false}}}' > "$TESTROOT/cfgdir35/.claude.json"
+HOME="$fake_home" CLAUDE_CONFIG_DIR="$TESTROOT/cfgdir35" GSD_LITE_CLAUDE_TRUST_CHECK=auto GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "CLAUDE_CONFIG_DIR is honoured" "$?" "6"
+# skip で省略できる
+HOME="$fake_home" CLAUDE_CONFIG_DIR="$TESTROOT/cfgdir35" GSD_LITE_CLAUDE_TRUST_CHECK=skip GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "TRUST_CHECK=skip bypasses" "$?" "0"
+# Codex だけのプロジェクトは Claude の trust を見ない
+make_codex_project "$TESTROOT/t35codex"
+jq -n --arg d "$PWD" '{projects: {($d): {hasTrustDialogAccepted: false}}}' > "$fake_home/.claude.json"
+HOME="$fake_home" GSD_LITE_CLAUDE_TRUST_CHECK=auto GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "codex-only project ignores Claude trust" "$?" "0"
+
+echo "== Test 36: 起動時の開始行（追記ログの区切り） =="
+make_project "$TESTROOT/b36"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" >> "$TESTROOT/append.log" 2>&1
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" >> "$TESTROOT/append.log" 2>&1
+assert_eq "start banner per launch" "$(grep -c '^gsd-lite: start ' "$TESTROOT/append.log")" "2"
+grep -q '^gsd-lite: start .* mode=repo' "$TESTROOT/append.log" && ok "banner shows mode" || ng "banner mode"
+grep -q 'mode=repo target=' "$TESTROOT/append.log" && ng "banner shows target for in-repo" || ok "banner omits target for in-repo"
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

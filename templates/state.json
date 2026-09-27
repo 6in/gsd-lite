@@ -20,7 +20,7 @@
   "max_turns": 60,
   "retry_max": 2,
   "verify_round": 0,
-  "verify_round_max": 2,
+  "verify_round_max": 3,
   "model": {
     "research": "claude-fable-5-1",
     "plan": "claude-fable-5-1",

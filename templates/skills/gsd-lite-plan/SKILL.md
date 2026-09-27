@@ -11,21 +11,34 @@ disable-model-invocation: true
 
 ## 作業場所の解決（最初に 1 回。全エンジン共通）
 
-```bash
-if [ -f .gsd-lite/state.json ]; then MS=.gsd-lite
-else MS=.gsd-lite/milestones/$(git branch --show-current | sed 's#^gsd-lite/##'); fi
-TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
+最初の Bash で **`gsd-lite-loop.sh --where` を 1 回だけ実行**し、出力を読む:
+
 ```
+mode=control            # in-repo | control
+milestone_dir=.gsd-lite/milestones/<slug>   # 以下「$MS」と書く場所。in-repo 形では .gsd-lite
+state=.gsd-lite/milestones/<slug>/state.json
+target=work/<name>      # 以下「$TARGET」と書く場所。in-repo 形では .
+slug=<slug>
+```
+
+**以降のコマンドでは、この出力の値をそのままリテラルで書く**（例: `cat .gsd-lite/milestones/todo-mvp/PLAN.md`、
+`git -C work/todo-cli status`）。本文の `$MS` / `$TARGET` は「ここに --where の値を書く」という印であり、
+シェル変数として使わない。Bash ツールはコール間でシェル変数を保持せず、環境によってはコマンド書き換えの
+フックが `$VAR` を空にするため、`MS=...; ...` と変数に入れてから使う書き方は失敗する。
 
 - `$MS` = マイルストーンディレクトリ。state.json と成果物（REQUIREMENTS / DECISIONS / RESEARCH / PLAN /
   PROGRESS / VERIFICATION / BLOCKED）はここ。従来の in-repo 形では `.gsd-lite/` そのもの。
   制御リポジトリ（gsd-control）形では `.gsd-lite/milestones/<slug>/`（slug は今いる制御ブランチ `gsd-lite/<slug>`）
 - `$TARGET` = コードを書く対象リポジトリ。`.` なら今いるリポジトリ（従来どおり）。`work/<name>` なら
-  gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C $TARGET` /
-  `cd $TARGET` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
-  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`$TARGET/CLAUDE.md` 等が
-  あれば最初に読んで規約に従う。`$TARGET` の中身を制御側に `git add` しない（gitignore 済み）
-- `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）
+  gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C <target>` /
+  `cd <target>` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
+  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`<target>/CLAUDE.md` 等が
+  あれば最初に読んで規約に従う。`<target>` の中身を制御側に `git add` しない（gitignore 済み）
+- `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）。
+  一時ファイル（プローブ用スクリプト等）が必要なら `/tmp` ではなく `.gsd-lite/logs/<slug>/scratch/` に置く
+  （`/tmp` への書き込みは allowlist 外で権限拒否になる。logs/ は gitignore 済み）
+- 環境メモ: lean-ctx 等の MCP ツールが未接続でも通常のツールで進めてよい。未接続であることは
+  PROGRESS の「想定外」に書かなくてよい（毎ターン同じ行が並ぶだけで振り返りの材料にならない）
 
 ## 手順
 
@@ -57,7 +70,13 @@ TARGET=$(jq -r '.target.path // "."' "$MS/state.json")
    - 依存順に並べる（impl は常に先頭の未完了タスクを取る）
    - **検証コマンド**セクションにこのプロジェクトでテストを回すコマンドを確定させる
      （対象リポジトリのルート `$TARGET` で実行するコマンドとして書く。impl は `cd $TARGET` して実行する）
-   - RESEARCH.md の参考実装・落とし穴をタスク設計に反映する
+   - RESEARCH.md の参考実装・落とし穴をタスク設計に反映する。**「盗める点」は採否表にして PLAN.md の
+     メモに載せる**（採用 / 却下と理由を 1 行ずつ）。特に参考実装が持つ堅牢性の設計（例外の親クラスでの
+     一括捕捉、原子的書き込み）を「最短実装」を理由に落とさない — 落とすと verify がそこを差し戻し、
+     修正ラウンドで同じ設計に戻ることになる
+   - 完了基準に例外処理を書くときは**例外名の列挙ではなく親クラス**で書く（「`OSError` 全体」「`ValueError` 系」）。
+     列挙が必要なら「少なくとも次を含む」とし、テストにはクラス代表 + 列挙外 1 件を入れる（列挙どおりに
+     実装されて同じクラスの取りこぼしが次の verify で指摘される、を防ぐ）
 3. ゴール逆算チェック: 全タスク完了 = REQUIREMENTS.md の受け入れ基準がすべて
    満たされる状態か確認。漏れがあればタスクを足す
 4. `phase: "impl"` / `next_command: "/gsd-lite-impl"` にする
