@@ -21,6 +21,12 @@ research → plan → impl → verify → 仕上げ（ローカルのみなら�
 
 ## 使い方（要約）
 
+作業場所の形は 2 つ。1 人で使うなら **in-repo 形**（対象リポジトリの中で直接動かす・既定）、
+複数人で同じ対象を扱う・対象の main にコードだけを入れたいなら **gsd-control 形**（状態と成果物を
+別の制御リポジトリに置く）。ループのフェーズ・進捗判定・終了コードはどちらも同じ。
+
+**in-repo 形**（対象リポジトリの中で）:
+
 ```bash
 cd <対象プロジェクト>
 claude
@@ -30,6 +36,28 @@ claude
 > /gsd-lite-init                       # 足場生成（プロジェクトごとに 1 回）
 > /gsd-lite-discuss 決済機能を追加したい   # AUQ で仕様を詰め切る → ループ起動まで面倒を見てくれる
 ```
+
+**gsd-control 形**（対象とは別の空ディレクトリで）:
+
+```bash
+mkdir ~/workspaces/gsd-control && cd ~/workspaces/gsd-control
+claude
+```
+
+```
+> /gsd-lite-init                       # 「gsd-control」を選び、対象の clone URL・名前・base ブランチを答える
+                                       # → 対象を work/<name> に clone（gitignore）、config.json・スキル・allowlist を生成してコミット
+> /gsd-lite-discuss 決済機能を追加したい   # 制御側と対象側の両方に gsd-lite/<slug> を切り、要件を .gsd-lite/milestones/<slug>/ に確定
+```
+
+gsd-control 形の注意（詳細は下の[制御リポジトリ方式](#制御リポジトリ方式gsd-control)）:
+
+- ループは**制御リポジトリのルートで、制御ブランチ `gsd-lite/<slug>` にいる状態で**起動する
+  （state の場所はブランチ名から決まる。`work/<name>` の中で起動しても見つからない）
+- 制御リポジトリのディレクトリも Claude Code の trust を受け入れておく（未 trust だと `claude -p` が
+  allowlist を全部無視する）。`gsd-lite-loop.sh --check` が検出して止める
+- コード・ブランチ・マージ・MR は対象側（`work/<name>`）、state と成果物は制御側の git に入る。
+  完了後の制御側ブランチ（制御 main へマージ / reflect だけ取り込む / 放置）は人間が選ぶ
 
 進捗確認（トークンゼロ）:
 
