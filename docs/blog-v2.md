@@ -11,7 +11,7 @@ motif may appear as mascots. Render every Japanese label EXACTLY as quoted, in a
 keep labels short, and do not add any other text. Default aspect ratio 16:9 (1600x900) unless noted.
 
 ■ 出力先: docs/images/blog-v2/figNN-*.png（記事中の画像リンクと同じファイル名）
-■ 図の一覧: 01 全体マップ / 02 マルチエンジン / 03 トークンのローテーション / 04 6 フェーズ / 05 PMI 振り返り /
+■ 図の一覧（03 は削除して欠番。ファイル名は生成済み画像に合わせて番号を詰めない）: 01 全体マップ / 02 マルチエンジン / 04 6 フェーズ / 05 PMI 振り返り /
   06 記録の強化 / 07 サブエージェント並列 / 08 運用ツール / 09 V2 実録の数字 / 10 チームでの衝突 /
   11 target.path / 12 2 つの git / 13 V2.5 実録の数字 / 14 trust 事件 / 15 次の構想
 -->
@@ -28,7 +28,7 @@ keep labels short, and do not add any other text. Default aspect ratio 16:9 (160
 PROMPT: A friendly overview map. In the center, a navy rounded badge labeled "gsd-lite" with a small crescent moon,
 and underneath it three small unchanged pillars labeled "新品のコンテキスト", "何も考えないループ", "潔く止まる".
 Around the center, six mint-outlined bubbles connected by thin lines, each with a simple icon:
-"3 エンジン" (three small robot heads), "モデル・トークン" (a dial and a key), "reflect" (a mirror),
+"3 エンジン" (three small robot heads), "フェーズ別モデル" (a speedometer-like dial), "reflect" (a mirror),
 "記録の強化" (a notebook and stopwatch), "並列化" (three parallel arrows), "運用ツール" (a toolbox).
 A seventh, larger bubble on the right filled with mint green labeled "V2.5 gsd-control" with an icon of two linked folders.
 Small label at top-left "V1 → V2 → V2.5". Cheerful sparkles around the V2.5 bubble.
@@ -40,7 +40,7 @@ Small label at top-left "V1 → V2 → V2.5". Cheerful sparkles around the V2.5 
 変わっていないものから先にお伝えしますね。前回の 3 原則「**毎ターン新品のコンテキスト**」「**何も考えないループ**」「**迷ったら潔く止まる**」は、そのままです ✋ 今回増えたのは、その周りの 7 つです。
 
 1. 🤹 **3 つの AI を適材適所に**（Claude Code / Codex / OpenCode をフェーズごとに選べる）
-2. 🎛️ **フェーズ別モデルとトークンのローテーション**
+2. 🎛️ **フェーズ別モデル**（計画とレビューは賢く、実装はコスパ重視で）
 3. 🪞 **reflect フェーズ**（完了後に、記録だけを根拠に振り返る）
 4. 📝 **記録の強化**（振り返りの材料をちゃんと残す）
 5. 🐙 **サブエージェントで並列に実装・レビュー**
@@ -78,26 +78,9 @@ state の `next_command` は `/gsd-lite-impl` のようなエンジン共通の�
 > 🐧 **ちょっとした落とし穴：Ubuntu 24.04 と Codex の sandbox**
 > Codex の Linux sandbox は bubblewrap が一般ユーザーで user namespace を作れることを前提にしています。Ubuntu 24.04 以降は AppArmor の既定でこれが禁止されていて、そのままだと **Codex のターンが何も書けずに終わる** んです 😱 V2 では、起動前の検証（後述の `--check`）で実際に `codex sandbox -- true` を叩いて確かめ、ダメなら対処法つきで止まるようにしました。
 
-## 🎛️ V2 その 2：フェーズ別モデルと、トークンのローテーション
+## 🎛️ V2 その 2：フェーズ別モデル
 
 「計画とレビューは賢いモデルで、実装はコスパ重視で」——これも state.json に書いておくだけで実現できます。モデル名は各エンジンの流儀で書けて、Codex なら推論強度、OpenCode ならバリアントやエージェントも指定できます。init のあとでも、ループを止めて state.json を編集・コミットすればいつでも変えられます ✍️
-
-もうひとつ、ちょっと便利な任意機能があります。**複数の組織（グループ）に所属している方向けの、トークンのローテーション**です 🔑
-
-<!-- 🎨 FIG-03 | file: images/blog-v2/fig03-token-rotation.jpg | 16:9
-PROMPT: A playful circular carousel diagram. Three rounded key cards arranged in a circle labeled "ORG_A", "ORG_B",
-"ORG_C", connected by curved mint arrows forming a loop A → B → C → A. In the center a small robot holding a turn
-counter labeled "ターンごとに切り替え". To the right, a speech bubble with a padlock icon saying
-"値は表示しない・変数名だけ". Keep it simple and cheerful, 16:9.
--->
-![図3: 組織ごとのトークンを、ターンごとに順番に使う](images/blog-v2/fig03-token-rotation.jpg)
-
-`claude setup-token` で組織ごとに取得したトークンを、それぞれ別名の環境変数に入れておき、その**変数名**を `GSD_LITE_CLAUDE_TOKEN_VARS` に並べるだけ。ループが Claude のターンを起動するたびに A → B → C → A…と順番に切り替えます。片方の組織が使用量の上限に達していても、次の試行は別のトークンで進めます 🏃
-
-トークンの値はログにも画面にも出さず、表示するのは変数名だけ。起動前の検証で全部の変数が空でないことも確かめます。
-
-> 🙏 **使い方のお願い**
-> これは「**ご自身が所属する複数の組織**のトークンを、ご自身の作業に順番に使う」ための機能です。ほかの方のトークンを集めて共有するような使い方は、費用の帰属があいまいになりますし、利用規約上の懸念もあります。ずっと回し続けたい場合は、API キーや Enterprise など、そのための契約を使うのがおすすめです。
 
 ## 🪞 V2 その 3：reflect —— 振り返りまでが開発です
 
@@ -110,7 +93,7 @@ icon and a tiny yellow "NEW" tag. Under "discuss" a caption "対話", under rese
 "ここから無人". A long curved dashed mint arrow goes from "reflect" back to "discuss" and "plan" of a faded next
 row labeled "次のマイルストーン", with the arrow labeled "次回への提案". Clean and cheerful.
 -->
-![図4: 6 フェーズになりました。振り返りの提案が次のマイルストーンに効いてくる](images/blog-v2/fig04-six-phases.jpg)
+![図3: 6 フェーズになりました。振り返りの提案が次のマイルストーンに効いてくる](images/blog-v2/fig04-six-phases.jpg)
 
 ここで大事なのは、**reflect のターンも新品のコンテキストで動く**ということです。つまり、作業の記憶はまったく持っていません 🙈 あるのは記録だけ。なので reflect には「記録から言えることだけを書く」「推測なら『推測:』と明記する」「Minus と Interesting には必ず根拠（ターン番号・コミット・ファイル）を添える」というルールを課しています。
 
@@ -123,7 +106,7 @@ On the right, an output note card divided into three colored columns with big sy
 "Minus −" (navy), "Interesting ！" (gray), and below it a checklist strip labeled "次回への提案" with three empty
 checkboxes. A small tag on the note card reads "根拠つき". 16:9.
 -->
-![図5: reflect は記録だけを材料に、PMI と「次回への提案」を書く](images/blog-v2/fig05-pmi.jpg)
+![図4: reflect は記録だけを材料に、PMI と「次回への提案」を書く](images/blog-v2/fig05-pmi.jpg)
 
 そして「次回への提案」は、**次のマイルストーンの plan と discuss が必ず読みます** 📖 反映した提案・しなかった提案は理由つきで PLAN.md や DECISIONS.md に残り、次の reflect が「前回の提案は守られたか？」をチェックします。振り返りが書きっぱなしにならない、小さな改善ループの完成です 🔁
 
@@ -142,7 +125,7 @@ PROMPT: Two side-by-side illustrations feeding into a funnel on the right that p
 "turns.jsonl" with tiny tags on the strips: "phase", "所要秒", "rc", "commits". Caption under the notebook:
 "各ターンの小さな振り返り", caption under the stopwatch: "ループが自動で計測". 16:9, cheerful.
 -->
-![図6: ターン自身の申し送りと、ループの客観的な計測。両方が reflect の材料になる](images/blog-v2/fig06-records.jpg)
+![図5: ターン自身の申し送りと、ループの客観的な計測。両方が reflect の材料になる](images/blog-v2/fig06-records.jpg)
 
 **① PROGRESS.md の申し送りを固定項目に** ✍️
 全フェーズ共通で「やったこと / 想定外 / やり直し / 次への注意」の 4 項目を必ず書きます。想定外がなければ「なし」、やり直しがなければ「0 回」。しかも「やり直しの原因が次のターンでも起こりそうなら、次への注意にも転記する」というルールつきです。各ターンが自分の小さな振り返りを残し、reflect がそれを集約するイメージですね。
@@ -161,7 +144,7 @@ Dotted arrows from each helper back up to the parent labeled "報告". Next to t
 "テスト → コミットは親だけ". At the bottom, a small red-outlined "no entry" sign listing crossed-out items:
 "git commit", "state.json", "PLAN.md", "PROGRESS.md" with the caption "サブエージェントは触らない". 16:9, cute.
 -->
-![図7: 親が分担を決め、子は担当ファイルだけを実装。コミットは親だけ](images/blog-v2/fig07-subagents.jpg)
+![図6: 親が分担を決め、子は担当ファイルだけを実装。コミットは親だけ](images/blog-v2/fig07-subagents.jpg)
 
 - 📋 **plan** が、各タスクに「並列サブ作業」（対象ファイルが重ならない独立した単位）を書きます
 - 💻 **impl** は、サブ作業が 2 つ以上あればサブ作業ごとにサブエージェントを起動して並行実装。親がまとめてテストしてコミットします
@@ -183,9 +166,9 @@ Panel 2 "--stop": a pause button between two turn blocks labeled "ターン N" a
 "ターンの切れ目で止まる". Panel 3 "--watch": a small dark terminal window mock (navy) showing a few mint text lines
 "phase : impl", "turn : 7/60", "- [ ] T4", with a tiny caption "q で終了 / s で中断". 16:9, clean and friendly.
 -->
-![図8: --check / --stop / --watch](images/blog-v2/fig08-ops-tools.jpg)
+![図7: --check / --stop / --watch](images/blog-v2/fig08-ops-tools.jpg)
 
-- ✅ **`--check`（事前検証）**：全フェーズの CLI とスキルの配置、git のコミット者設定、Codex sandbox の実効性、トークン変数を、**最初のターンより前に**確かめます。後半で使う CLI が足りないのに気づかず、夜中に途中で止まる……を防げます
+- ✅ **`--check`（事前検証）**：全フェーズの CLI とスキルの配置、git のコミット者設定、Codex sandbox の実効性を、**最初のターンより前に**確かめます。後半で使う CLI が足りないのに気づかず、夜中に途中で止まる……を防げます
 - ⏸️ **`--stop`（中断と再開）**：実行中のターンはコミットまでやり切らせて、次を始める前に止まります（終了コード 7）。再開は同じコマンドを叩くだけ
 - 👀 **`--watch`（簡易 TUI）**：状態・フェーズごとのエンジンとモデル・PLAN のタスク・実行中ターンのログ末尾を、数秒ごとに再描画。`q` で終了、`s` で中断依頼。読むだけなのでトークンはゼロです
 
@@ -201,7 +184,7 @@ labels: "20" "無人ターン", "0" "リトライ / BLOCKED", "317" "テスト g
 Bottom-left: a horizontal bar chart in mint with labels and values: "research 8.2", "plan 3.8", "impl ×14 50.2",
 "verify ×3 20.2", "reflect 4.5" (minutes). Bottom-right: a small moon and a sleeping robot with "zzz". 16:9.
 -->
-![図9: V2 の実録。20 ターンをリトライなしで完走](images/blog-v2/fig09-v2-results.jpg)
+![図8: V2 の実録。20 ターンをリトライなしで完走](images/blog-v2/fig09-v2-results.jpg)
 
 | 項目 | 値 |
 |---|---|
@@ -232,7 +215,7 @@ main: "成果物が main に混ざる". Right half titled "gsd-control": the sam
 labeled "コード" into "main" (clean, with a sparkle), while their ".gsd-lite/" boxes go into a separate navy folder
 labeled "制御リポジトリ" neatly arranged in separate drawers. A mint arrow from left to right. 16:9, humorous but clear.
 -->
-![図10: 複数人だと .gsd-lite/ がぶつかる。gsd-control は成果物を別の場所へ](images/blog-v2/fig10-team-conflict.jpg)
+![図9: 複数人だと .gsd-lite/ がぶつかる。gsd-control は成果物を別の場所へ](images/blog-v2/fig10-team-conflict.jpg)
 
 - 💥 各自の `.gsd-lite/` が main へのマージで衝突する
 - 🧺 対象の main に、gsd-lite の成果物が混ざってしまう
@@ -250,7 +233,7 @@ notebook icon. The right position is labeled "\"work/<name>\"" with a caption "g
 folders: one with a notebook (control), one with a code icon (target). Under the switch a ribbon reads
 "フェーズ・進捗判定・終了コードは共通". 16:9.
 -->
-![図11: target.path が "." なら従来どおり、"work/<name>" なら制御リポジトリ方式](images/blog-v2/fig11-target-path.jpg)
+![図10: target.path が "." なら従来どおり、"work/<name>" なら制御リポジトリ方式](images/blog-v2/fig11-target-path.jpg)
 
 - 🏠 `"."`（キーが無い古い state も同じ扱い）→ これまでどおり、今いるリポジトリで全部やる **in-repo 形**
 - 🏢 `"work/<name>"` → 制御リポジトリの下に対象を clone（gitignore）して、コードは対象側、状態と成果物は制御側に入れる **gsd-control 形**
@@ -268,7 +251,7 @@ Between them two labeled arrows: top arrow from a robot in the left panel to the
 At the bottom, two small branch tags side by side, one on each panel, both reading "gsd-lite/<slug>" joined by a
 ribbon labeled "同じ名前". 16:9.
 -->
-![図12: ループは制御リポジトリで動き、コードは対象へ、成果物と state は制御側へ](images/blog-v2/fig12-two-repos.jpg)
+![図11: ループは制御リポジトリで動き、コードは対象へ、成果物と state は制御側へ](images/blog-v2/fig12-two-repos.jpg)
 
 ループは制御リポジトリのルートで動きます。各ターンは、コードの変更・テスト・コミット・ブランチ・マージ・MR を `git -C work/<name>` で**対象側**に、要件・計画・進捗・検証・振り返りと state を**制御側**にコミットします。
 
@@ -298,7 +281,7 @@ Bottom: a horizontal timeline bar of the whole run from "13:13" to "15:34". Most
 with one long light-gray gap segment in the middle labeled "BLOCKED 待ち 79 分" and a small clock icon, and a tiny
 human icon at the end of the gap labeled "1 分で判断". 16:9.
 -->
-![図13: V2.5 の実録。15 ターンでリトライなし。ただし BLOCKED で 79 分待った](images/blog-v2/fig13-v25-results.jpg)
+![図12: V2.5 の実録。15 ターンでリトライなし。ただし BLOCKED で 79 分待った](images/blog-v2/fig13-v25-results.jpg)
 
 | 項目 | 値 |
 |---|---|
@@ -316,7 +299,7 @@ Around the scroll, three small crossed-out bubbles: "WebSearch ✕", "WebFetch �
 speech bubble from the detective: "原因は trust でした！". Bottom caption ribbon: "振り返りが、環境の問題を見つけた".
 Cheerful, 16:9.
 -->
-![図14: reflect が、ログの 1 行目から「許可ルールが全部無視されていた」ことを見つけた](images/blog-v2/fig14-trust-story.jpg)
+![図13: reflect が、ログの 1 行目から「許可ルールが全部無視されていた」ことを見つけた](images/blog-v2/fig14-trust-story.jpg)
 
 > 🔎 **本ターンのログ冒頭に「Ignoring 29 permissions.allow entries … this workspace has not been trusted」とあり、プロジェクトの許可ルール 29 件が一度も適用されていなかった可能性が高い**
 > ——reflect の Minus 欄より
@@ -376,7 +359,7 @@ PROMPT: A left-to-right flow of six rounded cards connected by mint arrows: "Iss
 Above the laptop a caption "discuss だけ人間", above the server a caption "あとは無人". A small dashed badge in the
 corner reads "構想（未実装）". 16:9, optimistic and cheerful.
 -->
-![図15: Issue にラベル → 担当者が PC で discuss → 本人のサーバが夜のうちに実装、の構想](images/blog-v2/fig15-next-issue-driven.jpg)
+![図14: Issue にラベル → 担当者が PC で discuss → 本人のサーバが夜のうちに実装、の構想](images/blog-v2/fig15-next-issue-driven.jpg)
 
 - 🏷️ Issue にラベルが付いたら、ルータが担当者を決めて、制御ブランチと要件の下書きを用意
 - 💬 担当者は自分の PC で discuss だけして push
