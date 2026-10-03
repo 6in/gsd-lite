@@ -129,6 +129,7 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 | `GSD_LITE_LIMIT_WAIT` | 利用上限（session / usage / rate limit）で無進捗に終わったターンを再試行するまでの待機秒数（既定: 900）。このとき retry は増やさない |
 | `GSD_LITE_LIMIT_MAX` | 利用上限による連続待機の上限回数（既定: 8）。超えたら auto-BLOCKED |
 | `GSD_LITE_LIMIT_PATTERN` | 利用上限と見なすターンログの拡張正規表現（大文字小文字を区別しない） |
+| `GSD_LITE_CLAUDE_STREAM` | 既定: `on`。Claude のターンを stream-json で起動し、トークン量・コスト・権限拒否を `turns.jsonl` に記録する（イベント列は `turn-NNN-attemptN.jsonl`、最終メッセージは従来の `.log`）。`off` で従来の平文ログだけ |
 | `GSD_LITE_CLAUDE_TOKEN_VARS` | 任意。Claude のターンで使う `CLAUDE_CODE_OAUTH_TOKEN` を、列挙した環境変数名からターンごとにラウンドロビンで切り替える（下記） |
 
 Codex は `approval_policy=never` で実行し、コミットのために Git 管理ディレクトリを
@@ -354,11 +355,27 @@ verify 合格でマージまたは MR/PR 作成が済んだ後、**reflect フ�
   次への注意`。各ターンが自分の小さな振り返りを残し、reflect がそれを集約する
 - **`.gsd-lite/logs/<milestone>/turns.jsonl`**: ループが 1 試行ごとに phase / engine / model /
   attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 / 増えたコミット数を 1 行ずつ追記する
-  （トークン不要の客観データ。トークン切り替え時は変数名も記録するが値は書かない）。
-  例: フェーズ別の集計
+  （トークン切り替え時は変数名も記録するが値は書かない）。エンジンが報告した場合は、同じ行に
+  **使用量**も入る:
+
+  | キー | 中身 | Claude | Codex | OpenCode |
+  |---|---|---|---|---|
+  | `usage` | `input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` | ○ | `total_tokens` のみ | — |
+  | `cost_usd` | そのターンの概算コスト | ○ | — | — |
+  | `num_turns` / `duration_api_ms` | ターン内の往復回数 / API 時間 | ○ | — | — |
+  | `permission_denials` | 承認待ちで拒否されたツール名（無人ターンが詰まる原因） | ○ | — | — |
+  | `rate_limit` | 利用枠の状態と使用率（`five_hour` / `seven_day`） | ○ | — | — |
+
+  Claude のターンは `--output-format stream-json --verbose` で起動し、イベント列を
+  `turn-NNN-attemptN.jsonl` に残す。ターン後に最終メッセージを従来どおり `turn-NNN-attemptN.log` に
+  書き出すので、平文ログを読む処理（利用上限の判定・reflect）は変わらない。`--watch` は実行中の
+  イベント列をツール呼び出しと本文の行に整形して表示する。ループは各ターンの後に
+  `turn N usage input=… output=… cache_read=… cost=$…` を出し、権限拒否があれば WARN を出す。
+  `--status` の `usage` 行はマイルストーンの合計。`GSD_LITE_CLAUDE_STREAM=off` で従来の平文だけに戻せる
+  （使用量は記録されない）。例: フェーズ別の集計
 
   ```bash
-  jq -s 'group_by(.phase) | map({phase: .[0].phase, attempts: length, sec: (map(.duration_s)|add), retries: (map(select(.attempt>1))|length)})' .gsd-lite/logs/<milestone>/turns.jsonl
+  jq -s 'group_by(.phase) | map({phase: .[0].phase, attempts: length, sec: (map(.duration_s)|add), retries: (map(select(.attempt>1))|length), out_tokens: (map(.usage.output_tokens // 0)|add), cost_usd: (map(.cost_usd // 0)|add)})' .gsd-lite/logs/<milestone>/turns.jsonl
   ```
 
 ほかに git log / diff、PLAN.md（計画タスク数と実ターン数の差）、VERIFICATION.md、

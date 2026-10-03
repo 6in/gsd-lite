@@ -101,8 +101,9 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
    [ -f .claude/settings.json ] || echo '{}' > .claude/settings.json
    EXTRA='[]'   # 下の判定で決めた追加許可。例: '["Bash(npm test:*)","Bash(npm run:*)"]'
    jq -s --argjson extra "$EXTRA" '
-     .[0] as $cur | .[1].permissions.allow as $tpl |
+     .[0] as $cur | .[1].permissions.allow as $tpl | (.[1].permissions.deny // []) as $deny |
      $cur | .permissions.allow = (($cur.permissions.allow // []) + $tpl + $extra | unique)
+          | .permissions.deny = (($cur.permissions.deny // []) + $deny | unique)
    ' .claude/settings.json ~/.claude/gsd-lite/templates/settings.allowlist.json > .claude/settings.json.tmp \
      && mv .claude/settings.json.tmp .claude/settings.json
    ```
@@ -110,7 +111,11 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
    中身は読まない: `package.json` → `Bash(npm test:*)` `Bash(npm run:*)`（`pnpm-lock.yaml` /
    `yarn.lock` / `bun.lockb` があればそのコマンドに読み替え）/ `pyproject.toml` や `pytest.ini` →
    `Bash(pytest:*)` `Bash(uv run:*)` / `Cargo.toml` → `Bash(cargo:*)` / `go.mod` → `Bash(go:*)` /
-   `Makefile` → `Bash(make:*)`。該当なしなら `[]`。分からなければユーザーに 1 回聞く
+   `Makefile` → `Bash(make:*)`。該当なしなら `[]`。分からなければユーザーに 1 回聞く。
+   雛形の `deny` にある `mcp__lean-ctx` は、ユーザー設定で lean-ctx の MCP を登録している環境で無人ターンが
+   `ctx_shell` などを呼び、承認待ちで拒否されるのを防ぐ（上の allow は `Bash(...)` 向けで MCP ツールには当たらない）。
+   ほかにも無人ターンに見える MCP サーバがあるなら、使わせるものは allow に、使わせないものは deny に足す。
+   ループは拒否されたツールを `turns.jsonl` の `permission_denials` と WARN で知らせる
    **Codex ではこの手順をスキップ**。ループは workspace-write sandbox と
    approval_policy=never で動き、コミット用に Git 管理ディレクトリを追加する。
    ネットワークや追加パスなど必要な権限は起動前に環境側で用意する。

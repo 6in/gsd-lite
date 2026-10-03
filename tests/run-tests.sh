@@ -986,5 +986,88 @@ make_project "$TESTROOT/t38b"
 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
 grep -q 'WARN state.updated_at' "$TESTROOT/loop-out.log" && ng "stub updated_at should not warn" || ok "stub updated_at does not warn"
 
+echo "== Test 39: Claude の stream-json からトークン量を turns.jsonl に記録し、平文ログも残す =="
+cat > "$TESTROOT/bin/claude-stream" <<'EOF'
+#!/usr/bin/env bash
+# stream-json を出す Claude の代役。state の更新とコミットは正常系スタブに任せ、その出力は捨てる
+"$(dirname "$0")/claude-happy" "$@" > /dev/null
+echo "stderr-like plain line"
+cat <<'JSON'
+{"type":"system","subtype":"init","tools":["Bash"]}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","resetsAt":1791052200,"unifiedWindows":{"five_hour":{"utilization":0.25},"seven_day":{"utilization":0.5}}}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Bash","input":{"command":"cat docs/rate limit notes.md"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"this project implements a rate limit"}]}}
+{"type":"system","subtype":"permission_denied","tool_name":"mcp__x__shell"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":3,"duration_api_ms":1200,"total_cost_usd":0.125,"result":"final answer of the turn","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":300,"cache_creation_input_tokens":40},"permission_denials":[{"tool_name":"mcp__x__shell"}]}
+JSON
+EOF
+chmod +x "$TESTROOT/bin/claude-stream"
+make_project "$TESTROOT/u39"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-stream" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "stream turn cycle DONE" "$?" "0"
+grep -q -- '--output-format stream-json --verbose' .gsd-lite/stub-args.log && ok "claude gets stream-json flags" || ng "stream-json flags missing"
+assert_eq "raw event logs kept per attempt" "$(ls .gsd-lite/logs/toy/turn-*-attempt1.jsonl | wc -l)" "6"
+assert_eq "plain logs still written" "$(ls .gsd-lite/logs/toy/turn-*.log | wc -l)" "6"
+assert_eq "plain log = non-JSON lines + final message" "$(cat .gsd-lite/logs/toy/turn-001-attempt1.log)" "$(printf 'stderr-like plain line\nfinal answer of the turn')"
+assert_eq "turns.jsonl usage" "$(jq -c 'select(.turn==1) | .usage' .gsd-lite/logs/toy/turns.jsonl)" '{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":300,"cache_creation_input_tokens":40}'
+assert_eq "turns.jsonl cost / num_turns" "$(jq -r 'select(.turn==1) | "\(.cost_usd) \(.num_turns)"' .gsd-lite/logs/toy/turns.jsonl)" "0.125 3"
+assert_eq "turns.jsonl permission denials" "$(jq -c 'select(.turn==1) | .permission_denials' .gsd-lite/logs/toy/turns.jsonl)" '["mcp__x__shell"]'
+assert_eq "turns.jsonl rate limit" "$(jq -r 'select(.turn==1) | "\(.rate_limit.status) \(.rate_limit.five_hour) \(.rate_limit.seven_day)"' .gsd-lite/logs/toy/turns.jsonl)" "allowed 0.25 0.5"
+assert_eq "turns.jsonl log still points at the plain log" "$(jq -r 'select(.turn==1) | .log' .gsd-lite/logs/toy/turns.jsonl)" ".gsd-lite/logs/toy/turn-001-attempt1.log"
+grep -q 'turn 1 usage input=10 output=20 cache_read=300 cache_creation=40 cost=\$0.125 5h=25% 7d=50%' "$TESTROOT/loop-out.log" && ok "usage line printed" || ng "usage line"
+grep -q 'WARN turn 1 had permission denials: 1 (mcp__x__shell)' "$TESTROOT/loop-out.log" && ok "permission denials warned" || ng "denial warning"
+grep -q 'usage limit hit' "$TESTROOT/loop-out.log" && ng "tool output mentioning 'rate limit' was taken for a usage limit" || ok "tool output does not trigger the limit wait"
+out=$("$LOOP" --status)
+echo "$out" | grep -q 'usage     : 6 attempts — in=60 out=120 cache_read=1800 cache_creation=240 cost=\$0.75 denials=6' && ok "status sums usage" || ng "status usage line"
+touch .gsd-lite/logs/toy/turn-006-attempt1.jsonl
+out=$(GSD_LITE_WATCH_LOG_LINES=4 "$LOOP" --watch-once)
+echo "$out" | grep -q -- '-- log: toy/turn-006-attempt1.jsonl' && ok "watch follows the running event log" || ng "watch jsonl header"
+echo "$out" | grep -q '^\[tool\] Bash {"command":"cat docs/rate limit notes.md"}' && ok "watch renders tool calls" || ng "watch tool line"
+echo "$out" | grep -q '^\[denied\] mcp__x__shell' && ok "watch renders denials" || ng "watch denial line"
+echo "$out" | grep -q '"type":"assistant"' && ng "watch shows raw JSON" || ok "watch hides raw JSON"
+# 無進捗（state を進めない）で stream の result も無い → 途中経過を平文化し、リトライ経路は従来どおり
+cat > "$TESTROOT/bin/claude-stream-cut" <<'EOF'
+#!/usr/bin/env bash
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"half way"}]}}'
+EOF
+chmod +x "$TESTROOT/bin/claude-stream-cut"
+make_project "$TESTROOT/u39b"
+commit_state '.retry_max=0'
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-stream-cut" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "cut stream -> BLOCKED" "$?" "2"
+assert_eq "cut stream is rendered to the plain log" "$(cat .gsd-lite/logs/toy/turn-001-attempt1.log)" "half way"
+jq -e 'has("usage")' .gsd-lite/logs/toy/turns.jsonl >/dev/null 2>&1 && ng "usage recorded without a result" || ok "no usage without a result"
+# 利用上限: rate_limit_event が rejected なら文言に依らず待機する
+cat > "$TESTROOT/bin/claude-stream-rejected" <<'EOF'
+#!/usr/bin/env bash
+echo '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}'
+echo '{"type":"result","subtype":"error","is_error":true,"result":"stopped","usage":{},"permission_denials":[]}'
+exit 1
+EOF
+chmod +x "$TESTROOT/bin/claude-stream-rejected"
+make_project "$TESTROOT/u39c"
+GSD_LITE_LIMIT_WAIT=0 GSD_LITE_LIMIT_MAX=1 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-stream-rejected" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "rejected rate limit -> limit path" "$(grep -c 'usage limit hit' "$TESTROOT/loop-out.log")" "1"
+# off なら従来どおり
+make_project "$TESTROOT/u39d"
+GSD_LITE_CLAUDE_STREAM=off GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "stream off cycle DONE" "$?" "0"
+grep -q -- '--output-format' .gsd-lite/stub-args.log && ng "stream flags passed with STREAM=off" || ok "no stream flags with STREAM=off"
+assert_eq "no event logs with STREAM=off" "$(ls .gsd-lite/logs/toy/*.jsonl | grep -vc turns.jsonl)" "0"
+grep -q 'stub did /gsd-lite-research' .gsd-lite/logs/toy/turn-001-attempt1.log && ok "plain log written directly with STREAM=off" || ng "plain log with STREAM=off"
+
+echo "== Test 40: Codex はログ末尾の tokens used を合計として記録する =="
+cat > "$TESTROOT/bin/codex-tokens" <<'EOF'
+#!/usr/bin/env bash
+"$(dirname "$0")/codex-happy" "$@"
+printf 'tokens used\n17,698\n'
+EOF
+chmod +x "$TESTROOT/bin/codex-tokens"
+make_codex_project "$TESTROOT/u40"
+commit_state '.max_turns=1'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-tokens" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "codex total tokens" "$(jq -c '.usage' .gsd-lite/logs/toy/turns.jsonl | head -n 1)" '{"total_tokens":17698}'
+ls .gsd-lite/logs/toy/turn-*-attempt*.jsonl >/dev/null 2>&1 && ng "codex wrote an event log" || ok "codex keeps the plain log only"
+
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

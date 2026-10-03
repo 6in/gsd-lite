@@ -45,9 +45,17 @@
 #   GSD_LITE_LIMIT_MAX         利用上限による連続の待機回数の上限（デフォルト 8）。超えたら auto-BLOCKED
 #   GSD_LITE_LIMIT_PATTERN     利用上限と見なすターンログの拡張正規表現（大文字小文字は区別しない。
 #                              デフォルト 'hit your (session|usage) limit|usage limit reached|rate limit'）
+#   GSD_LITE_CLAUDE_STREAM     on / off（デフォルト on）。on なら Claude のターンを
+#                              `--output-format stream-json --verbose` で起動し、イベント列を
+#                              turn-NNN-attemptN.jsonl に残す。ターン後に最終メッセージを従来の
+#                              turn-NNN-attemptN.log に書き出し、トークン量などを turns.jsonl に記録する。
+#                              off なら従来どおり平文の .log だけ（トークン量は記録されない）
 #
 # 計測: 各試行の phase / engine / model / attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 /
 # 増えたコミット数を logs/<milestone>/turns.jsonl に 1 行ずつ追記する（reflect フェーズの客観材料）。
+# エンジンが報告した場合は usage（トークン量）/ cost_usd / num_turns / permission_denials（承認待ちで
+# 拒否されたツール）/ rate_limit（利用枠の使用率）も同じ行に入る（Claude: stream-json の result、
+# Codex: ログ末尾の「tokens used」の合計のみ、OpenCode: なし）。
 #
 # 作業場所（2 つの形。どちらも state.target.path が「コードを書く対象」を指す）:
 #   in-repo（従来）: .gsd-lite/state.json があるリポジトリ。target.path は "."（未指定も同じ）。
@@ -81,6 +89,7 @@ TARGET=.                           # コードを書く対象リポジトリ（s
 PIDFILE="$GSD_DIR/loop.pid"        # 情報表示用（排他は flock が担う）
 LOCKFILE="$GSD_DIR/logs/.lock"     # logs/ は gitignore 済み
 RETRYFILE="$GSD_DIR/logs/.retry"
+usage_json="{}"                    # 直近のターンでエンジンが報告した使用量（turn_usage が埋める）
 LIMITFILE="$GSD_DIR/logs/.limit_retry"   # 利用上限による連続待機の回数（実行時情報）
 LIMIT_PATTERN="${GSD_LITE_LIMIT_PATTERN:-hit your (session|usage) limit|usage limit reached|rate limit}"
 TOKENFILE="$GSD_DIR/logs/.token_index"   # トークンのラウンドロビン位置（実行時情報）
@@ -177,7 +186,65 @@ count_commits() { # count_commits <before> <after> [<repo dir>] — 2 つの HEA
   fi
 }
 
-record_turn() { # 1 試行ぶんの計測値を logs/<milestone>/turns.jsonl に追記（reflect の客観材料。トークン不要）
+# stream-json の 1 行を人が読める行にする jq フィルタ（--watch と、result の無いログの平文化で共用）。
+# JSON でない行（stderr・テスト用スタブの出力）はそのまま通す
+STREAM_RENDER='. as $l | try (fromjson
+  | if type != "object" then $l
+    elif .type == "assistant" then (.message.content[]?
+      | if .type == "text" then .text
+        elif .type == "tool_use" then "[tool] \(.name) \(.input | tostring | .[0:160])"
+        else empty end)
+    elif .type == "system" and .subtype == "permission_denied" then "[denied] \(.tool_name)"
+    elif .type == "result" then "[result] \(.result // "")"
+    else empty end) catch $l'
+
+finalize_turn_log() { # Claude の stream-json（$rawlog）から従来の平文ログ（$log）を作る
+  [ "$rawlog" != "$log" ] || return 0
+  # 最終メッセージ（result）と JSON でない行だけを残す。result が無い（timeout で kill 等）なら途中経過を平文化する
+  jq -Rr '. as $l | try (fromjson | if type != "object" then $l
+      elif .type == "result" then (.result // empty) else empty end) catch $l' "$rawlog" > "$log" 2>/dev/null
+  if ! jq -Re 'fromjson? | select(type == "object" and .type == "result")' "$rawlog" >/dev/null 2>&1; then
+    jq -Rr "$STREAM_RENDER" "$rawlog" > "$log" 2>/dev/null || cp "$rawlog" "$log"
+  fi
+}
+
+turn_usage() { # このターンでエンジンが報告した使用量を JSON 1 個で出す（取れなければ {}）
+  local total
+  case "$ENGINE" in
+    claude)
+      [ "$rawlog" != "$log" ] || { echo '{}'; return 0; }
+      jq -Rnc 'reduce (inputs | fromjson? | select(type == "object")) as $e ({};
+          if $e.type == "result" then . + {
+            usage: {input_tokens: $e.usage.input_tokens, output_tokens: $e.usage.output_tokens,
+                    cache_read_input_tokens: $e.usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: $e.usage.cache_creation_input_tokens},
+            cost_usd: $e.total_cost_usd, num_turns: $e.num_turns, duration_api_ms: $e.duration_api_ms,
+            is_error: $e.is_error, permission_denials: [$e.permission_denials[]?.tool_name]}
+          elif $e.type == "rate_limit_event" then . + {rate_limit: ($e.rate_limit_info
+            | {status, type: .rateLimitType, resets_at: .resetsAt,
+               five_hour: .unifiedWindows.five_hour.utilization, seven_day: .unifiedWindows.seven_day.utilization})}
+          else . end)' "$rawlog" 2>/dev/null || echo '{}' ;;
+    codex)
+      # codex exec は平文ログの末尾に「tokens used」と合計値（桁区切りあり）を出す。内訳は無い
+      total=$(awk 'tolower($0) == "tokens used" { getline; gsub(/[^0-9]/, ""); v = $0 } END { if (v != "") print v }' "$log" 2>/dev/null)
+      if [ -n "$total" ]; then jq -nc --argjson t "$total" '{usage: {total_tokens: $t}}'; else echo '{}'; fi ;;
+    *) echo '{}' ;;
+  esac
+}
+
+report_usage() { # 使用量と権限拒否を 1 行で知らせる（loop.log に残る）
+  [ "$usage_json" != '{}' ] || return 0
+  echo "gsd-lite: turn $((turn_before + 1)) usage $(echo "$usage_json" | jq -r '
+    [ (.usage // {} | to_entries[] | select(.value != null) | "\(.key | sub("_input_tokens$"; "") | sub("_tokens$"; ""))=\(.value)"),
+      (if .cost_usd != null then "cost=$\(.cost_usd * 10000 | round / 10000)" else empty end),
+      (if .rate_limit.five_hour != null then "5h=\(.rate_limit.five_hour * 100 | round)%" else empty end),
+      (if .rate_limit.seven_day != null then "7d=\(.rate_limit.seven_day * 100 | round)%" else empty end) ] | join(" ")')"
+  local denied
+  denied=$(echo "$usage_json" | jq -r '(.permission_denials // []) | if length > 0 then "\(length) (\(unique | join(", ")))" else empty end')
+  [ -z "$denied" ] || echo "gsd-lite: WARN turn $((turn_before + 1)) had permission denials: $denied — allowlist（.claude/settings.json）に足すか、そのツールを deny して使わせない" >&2
+}
+
+record_turn() { # 1 試行ぶんの計測値を logs/<milestone>/turns.jsonl に追記（reflect の客観材料）
   local head_after finished_epoch commits progressed target_head_after target_commits target_json
   head_after=$(git rev-parse HEAD 2>/dev/null || echo "")
   finished_epoch=$(date +%s)
@@ -198,11 +265,23 @@ record_turn() { # 1 試行ぶんの計測値を logs/<milestone>/turns.jsonl に
     --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson duration "$((finished_epoch - started_epoch))" \
     --argjson rc "$rc" --argjson progressed "$progressed" --argjson commits "${commits:-0}" \
     --arg head_before "$head_before" --arg head_after "$head_after" --arg log "$log" \
-    --arg token_var "$token_var" --argjson target "$target_json" \
+    --arg token_var "$token_var" --argjson target "$target_json" --argjson usage "$usage_json" \
     '{turn:$turn, phase:$phase, engine:$engine, model:$model, attempt:$attempt,
       started_at:$started, finished_at:$finished, duration_s:$duration, rc:$rc,
       progressed:$progressed, commits:$commits, head_before:$head_before, head_after:$head_after,
-      log:$log, token_var:$token_var} + $target' >> "$logdir/turns.jsonl" 2>/dev/null || true
+      log:$log, token_var:$token_var} + $target + $usage' >> "$logdir/turns.jsonl" 2>/dev/null || true
+}
+
+usage_summary() { # --status 用: このマイルストーンの turns.jsonl に記録された使用量の合計（記録が無ければ何も出さない）
+  local f
+  f="$GSD_DIR/logs/$(sget '.milestone // "default"')/turns.jsonl"
+  [ -f "$f" ] || return 0
+  jq -rs 'map(select(.usage != null)) | if length == 0 then empty else
+      "usage     : \(length) attempts — in=\(map(.usage.input_tokens // 0) | add) out=\(map(.usage.output_tokens // 0) | add) cache_read=\(map(.usage.cache_read_input_tokens // 0) | add) cache_creation=\(map(.usage.cache_creation_input_tokens // 0) | add)"
+      + (map(.usage.total_tokens // 0) | add | if . > 0 then " total=\(.)" else "" end)
+      + (map(.cost_usd // 0) | add | if . > 0 then " cost=$\(. * 100 | round / 100)" else "" end)
+      + (map(.permission_denials // [] | length) | add | if . > 0 then " denials=\(.)" else "" end)
+    end' "$f" 2>/dev/null || true
 }
 
 finish() { # finish <exit_code> — on-exit フックを呼んで終了
@@ -480,6 +559,7 @@ status() {
   echo "subagents : $(sget '.subagents // "auto"')"
   token_summary
   trust_summary
+  usage_summary
   if [ -f "$STOPFILE" ]; then
     echo "stop      : requested (cleared on next start)"
   else
@@ -517,7 +597,7 @@ WATCH_LOG_LINES="${GSD_LITE_WATCH_LOG_LINES:-15}"
 latest_turn_log() { # 最新のターンログ（マイルストーン別ディレクトリ内で更新時刻が最新のもの）
   local milestone
   milestone=$(sget '.milestone // empty')
-  ls -t "$GSD_DIR/logs/${milestone:-default}"/turn-*.log 2>/dev/null | head -n 1
+  ls -t "$GSD_DIR/logs/${milestone:-default}"/turn-*.log "$GSD_DIR/logs/${milestone:-default}"/turn-*-attempt*.jsonl 2>/dev/null | head -n 1
 }
 
 watch_render() { # 1 画面ぶんを標準出力に描く
@@ -539,7 +619,10 @@ watch_render() { # 1 画面ぶんを標準出力に描く
   log=$(latest_turn_log)
   if [ -n "$log" ]; then
     echo "-- log: ${log#$GSD_DIR/logs/} (last $WATCH_LOG_LINES lines) --"
-    tail -n "$WATCH_LOG_LINES" "$log" | cut -c1-"$cols"
+    case "$log" in
+      *.jsonl) jq -Rr "$STREAM_RENDER" "$log" 2>/dev/null | tail -n "$WATCH_LOG_LINES" | cut -c1-"$cols" ;;   # 実行中の Claude ターン
+      *) tail -n "$WATCH_LOG_LINES" "$log" | cut -c1-"$cols" ;;
+    esac
   fi
 }
 
@@ -653,6 +736,7 @@ while true; do
   logdir="$GSD_DIR/logs/${milestone:-default}"   # マイルストーン別に分けて上書きを防ぐ
   mkdir -p "$logdir"
   log="$logdir/turn-$(printf '%03d' $((turn_before + 1)))-attempt$((retry + 1)).log"
+  rawlog="$log"   # エンジンの出力先。Claude の stream-json のときだけ .jsonl に分け、ターン後に .log を作る
 
   agent_args=()
   if [ "$ENGINE" != claude ]; then
@@ -699,6 +783,10 @@ while true; do
 
     agent_args=(-p "$cmd" --permission-mode "$PERMISSION_MODE")
     [ -z "$model" ] || agent_args+=(--model "$model")
+    if [ "${GSD_LITE_CLAUDE_STREAM:-on}" != off ]; then
+      agent_args+=(--output-format stream-json --verbose)
+      rawlog="${log%.log}.jsonl"
+    fi
   fi
   # 任意: Claude のターンは GSD_LITE_CLAUDE_TOKEN_VARS のトークンをラウンドロビンで使う。
   # 値は env の引数に載せず（ps に見えない）、サブシェルで export してから起動する
@@ -719,21 +807,26 @@ while true; do
     exec env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
       timeout -k 30 "${GSD_LITE_TURN_TIMEOUT:-3600}" \
       "$AGENT_BIN" "${agent_args[@]}" \
-      < /dev/null > "$log" 2>&1 9>&-
+      < /dev/null > "$rawlog" 2>&1 9>&-
   )
   rc=$?
+  finalize_turn_log
+  usage_json=$(turn_usage)
+  [ -n "$usage_json" ] && echo "$usage_json" | jq -e 'type == "object"' >/dev/null 2>&1 || usage_json='{}'
 
   # 進捗判定は rc に依らず「コミット済み (HEAD) の state」で行う。
   # 正常終了でも commit まで到達していなければ成功と認めない
   turn_after=$(committed_state '.turn')
   [ -n "$turn_after" ] || die "cannot read committed state (HEAD:$STATE)"
   record_turn
+  report_usage
   # ターン境界の正規化: 作業ツリーの state を HEAD に揃える（未コミットの書きかけを残さない）
   git checkout HEAD -- "$STATE" || die "failed to restore $STATE from HEAD"
 
   if [ "$turn_after" -le "$turn_before" ]; then
     # 利用上限で落ちたターンは詰まりではないので retry を増やさず、待ってから同じターンをやり直す
-    if grep -Eqi -- "$LIMIT_PATTERN" "$log" 2>/dev/null; then
+    if grep -Eqi -- "$LIMIT_PATTERN" "$log" 2>/dev/null ||
+       [ "$(echo "$usage_json" | jq -r '.rate_limit.status // empty')" = rejected ]; then
       limit_retry=$(( $(get_limit_retry) + 1 ))
       limit_max="${GSD_LITE_LIMIT_MAX:-8}"
       if [ "$limit_retry" -gt "$limit_max" ]; then

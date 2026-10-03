@@ -1,5 +1,5 @@
 {
-  "_comment": "gsd-lite の無人ターン (claude -p) 用 allowlist の雛形。init がプロジェクトの .claude/settings.json にマージする。テストランナー等はプロジェクトに合わせて調整すること。",
+  "_comment": "gsd-lite の無人ターン (claude -p) 用 allowlist の雛形。init がプロジェクトの .claude/settings.json にマージする。テストランナー等はプロジェクトに合わせて調整すること。deny の mcp__lean-ctx は、ユーザー設定で lean-ctx の MCP を登録している環境向け: 無人ターンが ctx_shell 等を呼んで承認待ちで拒否されるのを防ぎ、Bash 等の通常ツール（上の allow の対象）を使わせる。lean-ctx の hook による出力圧縮はそのまま効く。",
   "permissions": {
     "allow": [
       "Bash(git status:*)",
@@ -35,6 +35,9 @@
       "WebSearch",
       "WebFetch(domain:*)",
       "Read(~/workspaces/**)"
+    ],
+    "deny": [
+      "mcp__lean-ctx"
     ]
   }
 }

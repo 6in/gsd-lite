@@ -58,9 +58,13 @@ slug=<slug>
    engine / phase_engines / model・codex・opencode / subagents
 2. `.gsd-lite/logs/<milestone>/turns.jsonl`: ループが 1 試行ごとに記録した客観データ
    （phase / engine / model / attempt / 所要秒 / rc / progressed / commits。gsd-control 形では
-   対象側に増えたコード側のコミット数 `target_commits` も）。
+   対象側に増えたコード側のコミット数 `target_commits` も）。エンジンが報告したターンには
+   `usage`（`input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`。
+   Codex は `total_tokens` だけ）/ `cost_usd` / `num_turns` / `permission_denials`（承認待ちで拒否された
+   ツール名）/ `rate_limit`（利用枠の使用率）も入る。無い行は「記録なし」として扱い、推定で埋めない。
    ここから**フェーズ別の所要時間・リトライが起きたターン・無進捗の試行**を集計する。
-   `jq` でまとめて読む（例: `jq -s 'group_by(.phase) | map({phase: .[0].phase, turns: length, sec: (map(.duration_s) | add), retries: map(select(.attempt > 1)) | length})'`）
+   `jq` でまとめて読む（例: `jq -s 'group_by(.phase) | map({phase: .[0].phase, turns: length, sec: (map(.duration_s) | add), retries: map(select(.attempt > 1)) | length, out_tokens: (map(.usage.output_tokens // 0) | add), cache_read: (map(.usage.cache_read_input_tokens // 0) | add), cost_usd: (map(.cost_usd // 0) | add), denials: (map(.permission_denials // []) | add | group_by(.) | map("\(.[0]) x\(length)"))})'`）。
+   `permission_denials` が出ているターンは Minus の材料（allowlist に足すか deny するかを提案に書く）
 3. `$MS/PROGRESS.md`: 各ターンの申し送り（やったこと / 想定外 / やり直し / 次への注意）。
    「想定外」と「やり直し」の欄が Minus の主材料
 4. `git -C $TARGET log --format='%h %ad %s' --date=iso <branch.base>...HEAD`（または対象範囲）と
@@ -97,10 +101,12 @@ slug=<slug>
 
 ## 計測（turns.jsonl から）
 
-| フェーズ | ターン数 | 試行数 | 所要（分） | リトライ | エンジン / モデル |
-|---|---|---|---|---|---|
-| research | 1 | 1 | 4 | 0 | claude / ... |
-| ... | | | | | |
+| フェーズ | ターン数 | 試行数 | 所要（分） | リトライ | 出力トークン | キャッシュ読み | コスト（USD） | エンジン / モデル |
+|---|---|---|---|---|---|---|---|---|
+| research | 1 | 1 | 4 | 0 | 3,200 | 410,000 | 0.42 | claude / ... |
+| ... | | | | | | | | |
+
+- 権限拒否（permission_denials）: なし | <ツール名 × 回数（どのターン）>
 
 - 計画タスク数 / impl ターン数: N / M
 - verify 差し戻し: verify_round 回（指摘 K 件）/ BLOCKED: 回数と原因の要約
