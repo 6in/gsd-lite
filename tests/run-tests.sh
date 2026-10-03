@@ -1069,5 +1069,20 @@ GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-tokens" "$LOOP" > "$TESTROOT/loop-out.lo
 assert_eq "codex total tokens" "$(jq -c '.usage' .gsd-lite/logs/toy/turns.jsonl | head -n 1)" '{"total_tokens":17698}'
 ls .gsd-lite/logs/toy/turn-*-attempt*.jsonl >/dev/null 2>&1 && ng "codex wrote an event log" || ok "codex keeps the plain log only"
 
+echo "== Test 41: Claude Code プラグイン（マニフェストと --skip-init-skill） =="
+assert_eq "plugin manifest name" "$(jq -r .name "$REPO_DIR/.claude-plugin/plugin.json")" "gsd-lite"
+assert_eq "marketplace lists the plugin at the repo root" "$(jq -r '.plugins[] | "\(.name) \(.source)"' "$REPO_DIR/.claude-plugin/marketplace.json")" "gsd-lite ./"
+assert_eq "plugin and marketplace versions match" "$(jq -r .version "$REPO_DIR/.claude-plugin/plugin.json")" "$(jq -r '.plugins[0].version' "$REPO_DIR/.claude-plugin/marketplace.json")"
+grep -q '"${CLAUDE_PLUGIN_ROOT}/install.sh" --skip-init-skill --engine claude' "$REPO_DIR/skills/gsd-lite-init/SKILL.md" && ok "init skill syncs from the plugin root" || ng "init skill plugin sync line"
+install_root="$TESTROOT/plugin install"
+GSD_LITE_INSTALL_ROOT="$install_root" "$REPO_DIR/install.sh" --skip-init-skill --engine claude > "$TESTROOT/install.log" 2>&1
+assert_eq "install --skip-init-skill" "$?" "0"
+[ -x "$install_root/.local/bin/gsd-lite-loop.sh" ] && ok "plugin sync installs the loop" || ng "loop missing"
+[ -f "$install_root/.claude/gsd-lite/templates/skills/gsd-lite-impl/SKILL.md" ] && ok "plugin sync installs templates" || ng "templates missing"
+[ ! -e "$install_root/.claude/skills/gsd-lite-init" ] && ok "plugin sync leaves the init skill to the plugin" || ng "init skill copied"
+grep -q 'claude skill' "$TESTROOT/install.log" && ng "skill line printed with --skip-init-skill" || ok "no skill line with --skip-init-skill"
+"$REPO_DIR/install.sh" --skip-init-skill --bogus > /dev/null 2>&1
+assert_eq "bad args still rejected" "$?" "1"
+
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
