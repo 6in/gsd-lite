@@ -930,5 +930,61 @@ assert_eq "start banner per launch" "$(grep -c '^gsd-lite: start ' "$TESTROOT/ap
 grep -q '^gsd-lite: start .* mode=repo' "$TESTROOT/append.log" && ok "banner shows mode" || ng "banner mode"
 grep -q 'mode=repo target=' "$TESTROOT/append.log" && ng "banner shows target for in-repo" || ok "banner omits target for in-repo"
 
+echo "== Test 37: 利用上限で落ちたターンは retry を増やさず待って再試行 =="
+cat > "$TESTROOT/bin/claude-limit-once" <<'EOF'
+#!/usr/bin/env bash
+# 1 回目は利用上限で何もせず終わり、2 回目以降は正常系スタブに委ねる
+if [ ! -e .gsd-lite/limit-seen ]; then
+  touch .gsd-lite/limit-seen
+  echo "You've hit your session limit · resets 3am"
+  exit 1
+fi
+exec "$(dirname "$0")/claude-happy" "$@"
+EOF
+cat > "$TESTROOT/bin/claude-limit-always" <<'EOF'
+#!/usr/bin/env bash
+echo "Claude usage limit reached. Your limit will reset at 5pm"
+exit 1
+EOF
+chmod +x "$TESTROOT/bin/claude-limit-once" "$TESTROOT/bin/claude-limit-always"
+make_project "$TESTROOT/t37"
+printf '.gsd-lite/limit-seen\n' >> .gitignore && git add .gitignore && git commit -qm ignore
+commit_state '.retry_max=0'
+GSD_LITE_LIMIT_WAIT=0 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-limit-once" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "limit hit does not consume retry_max=0" "$?" "0"
+grep -q 'usage limit hit (wait 1/8' "$TESTROOT/loop-out.log" && ok "limit wait logged" || ng "limit wait not logged"
+assert_eq "limit counter reset after progress" "$(cat .gsd-lite/logs/.limit_retry)" "0"
+assert_eq "limited attempt is recorded in turns.jsonl" "$(jq -r 'select(.turn==1) | .attempt' .gsd-lite/logs/toy/turns.jsonl | paste -sd,)" "1,1"
+make_project "$TESTROOT/t37b"
+GSD_LITE_LIMIT_WAIT=0 GSD_LITE_LIMIT_MAX=2 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-limit-always" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "persistent limit -> BLOCKED" "$?" "2"
+assert_eq "persistent limit waited LIMIT_MAX times" "$(grep -c 'usage limit hit' "$TESTROOT/loop-out.log")" "2"
+assert_eq "persistent limit blocked committed" "$(git show HEAD:.gsd-lite/state.json | jq -r .next_command)" "BLOCKED"
+grep -q '利用上限' .gsd-lite/BLOCKED.md && ok "BLOCKED.md names the usage limit" || ng "BLOCKED.md reason"
+assert_eq "retry untouched by limit waits" "$(cat .gsd-lite/logs/.retry 2>/dev/null || echo 0)" "0"
+make_control_project "$TESTROOT/ctl37"
+commit_ms_state '.retry_max=0'
+GSD_LITE_LIMIT_WAIT=0 GSD_LITE_LIMIT_MAX=1 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-limit-always" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "control: persistent limit -> BLOCKED" "$?" "2"
+[ -f .gsd-lite/milestones/toy/BLOCKED.md ] && ok "control: limit BLOCKED.md under the milestone dir" || ng "control: limit BLOCKED.md location"
+grep -q 'milestones/toy/BLOCKED.md' "$TESTROOT/loop-out.log" && ok "control: limit message points at the milestone dir" || ng "control: limit message path"
+
+echo "== Test 38: updated_at がコミット時刻より先なら警告 =="
+cat > "$TESTROOT/bin/claude-future-stamp" <<'EOF'
+#!/usr/bin/env bash
+STATE=.gsd-lite/state.json
+t=$(mktemp)
+jq '.turn+=1 | .phase="done" | .next_command="DONE" | .updated_at="2999-01-01T00:00:00+09:00"' "$STATE" > "$t" && mv "$t" "$STATE"
+git add -A >/dev/null && git commit -qm "future stamp"
+EOF
+chmod +x "$TESTROOT/bin/claude-future-stamp"
+make_project "$TESTROOT/t38"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-future-stamp" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "future stamp still advances" "$?" "0"
+grep -q 'WARN state.updated_at (2999-01-01' "$TESTROOT/loop-out.log" && ok "future updated_at warned" || ng "future updated_at not warned"
+make_project "$TESTROOT/t38b"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+grep -q 'WARN state.updated_at' "$TESTROOT/loop-out.log" && ng "stub updated_at should not warn" || ok "stub updated_at does not warn"
+
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

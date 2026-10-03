@@ -126,6 +126,9 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 | `GSD_LITE_CODEX_SANDBOX` | 既定: `workspace-write`。bubblewrap が使えない環境では `danger-full-access`（sandbox なし。隔離環境向け） |
 | `GSD_LITE_CODEX_SANDBOX_PROBE` | 既定: `auto`。Codex を使うフェーズがあれば起動前に `codex sandbox -- true` で sandbox の実効性を検証する。`skip` で省略 |
 | `GSD_LITE_TURN_TIMEOUT` | 1 ターンの制限秒数（既定: 3600、両エンジン共通） |
+| `GSD_LITE_LIMIT_WAIT` | 利用上限（session / usage / rate limit）で無進捗に終わったターンを再試行するまでの待機秒数（既定: 900）。このとき retry は増やさない |
+| `GSD_LITE_LIMIT_MAX` | 利用上限による連続待機の上限回数（既定: 8）。超えたら auto-BLOCKED |
+| `GSD_LITE_LIMIT_PATTERN` | 利用上限と見なすターンログの拡張正規表現（大文字小文字を区別しない） |
 | `GSD_LITE_CLAUDE_TOKEN_VARS` | 任意。Claude のターンで使う `CLAUDE_CODE_OAUTH_TOKEN` を、列挙した環境変数名からターンごとにラウンドロビンで切り替える（下記） |
 
 Codex は `approval_policy=never` で実行し、コミットのために Git 管理ディレクトリを

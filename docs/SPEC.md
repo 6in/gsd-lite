@@ -495,6 +495,11 @@ done
   リトライ上限後は自動で BLOCKED に落とす
 - **ターンのタイムアウト**: `timeout`（`GSD_LITE_TURN_TIMEOUT` 秒、デフォルト 3600）で
   各ターンを包む。ハングしたターンは kill され「進捗なし」としてリトライ経路に乗る
+- **利用上限はリトライに数えない**: 無進捗のターンのログが利用上限の文言
+  （`GSD_LITE_LIMIT_PATTERN`）に当たれば、`retry` を増やさず `GSD_LITE_LIMIT_WAIT` 秒待って
+  同じターンをやり直す。連続 `GSD_LITE_LIMIT_MAX` 回で auto-BLOCKED（本当の詰まりと区別するため）
+- **`updated_at` の検査**: 進捗したターンの `updated_at` が HEAD のコミット時刻より 5 分以上先なら
+  WARN を出す（値は直さない。モデルが時刻を見積もって書いた兆候）
 - **信頼するのはコミット済み state のみ（rc に依らず）**: 進捗判定は常に HEAD の
   state の `turn` で行い、各ターン後に作業ツリーの state を `git checkout HEAD --` で
   正規化する。「state は書いたがコミットしなかった」ターンは rc=0 でも成功扱いしない。

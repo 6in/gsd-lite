@@ -25,6 +25,13 @@
       "Bash(grep:*)",
       "Bash(rg:*)",
       "Bash(find:*)",
+      "Bash(date:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(diff:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
       "WebSearch",
       "WebFetch(domain:*)",
       "Read(~/workspaces/**)"

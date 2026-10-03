@@ -40,6 +40,11 @@
 #   GSD_LITE_WATCH_LOG_LINES   --watch で表示するログ末尾の行数（デフォルト 15。+/- キーで増減）
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
 #                              kill し、進捗なし→リトライ経路に乗せる）
+#   GSD_LITE_LIMIT_WAIT        利用上限（session / usage / rate limit）で進捗なしに終わったターンの
+#                              再試行までの待機秒数（デフォルト 900）。このときは retry を増やさない
+#   GSD_LITE_LIMIT_MAX         利用上限による連続の待機回数の上限（デフォルト 8）。超えたら auto-BLOCKED
+#   GSD_LITE_LIMIT_PATTERN     利用上限と見なすターンログの拡張正規表現（大文字小文字は区別しない。
+#                              デフォルト 'hit your (session|usage) limit|usage limit reached|rate limit'）
 #
 # 計測: 各試行の phase / engine / model / attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 /
 # 増えたコミット数を logs/<milestone>/turns.jsonl に 1 行ずつ追記する（reflect フェーズの客観材料）。
@@ -76,6 +81,8 @@ TARGET=.                           # コードを書く対象リポジトリ（s
 PIDFILE="$GSD_DIR/loop.pid"        # 情報表示用（排他は flock が担う）
 LOCKFILE="$GSD_DIR/logs/.lock"     # logs/ は gitignore 済み
 RETRYFILE="$GSD_DIR/logs/.retry"
+LIMITFILE="$GSD_DIR/logs/.limit_retry"   # 利用上限による連続待機の回数（実行時情報）
+LIMIT_PATTERN="${GSD_LITE_LIMIT_PATTERN:-hit your (session|usage) limit|usage limit reached|rate limit}"
 TOKENFILE="$GSD_DIR/logs/.token_index"   # トークンのラウンドロビン位置（実行時情報）
 TOKEN_VARS=()                           # check_claude_tokens が GSD_LITE_CLAUDE_TOKEN_VARS から埋める
 STOPFILE="$GSD_DIR/logs/.stop"    # 実行時情報。gitignore 済み logs/ に置く
@@ -125,6 +132,32 @@ supdate() { # supdate '<jq filter>' — state.json をインプレース更新
 
 get_retry() { cat "$RETRYFILE" 2>/dev/null || echo 0; }
 set_retry() { echo "$1" > "$RETRYFILE"; }
+get_limit_retry() { cat "$LIMITFILE" 2>/dev/null || echo 0; }
+set_limit_retry() { echo "$1" > "$LIMITFILE"; }
+
+auto_block() { # auto_block <BLOCKED.md の本文> <commit の要約> — ループ自身が BLOCKED を書いてコミットして終了
+  supdate '.next_command = "BLOCKED" | .phase = "blocked"'
+  {
+    echo "# BLOCKED (auto)"
+    echo ""
+    echo "$1"
+  } > "$MS_DIR/BLOCKED.md"
+  git add "$STATE" "$MS_DIR/BLOCKED.md" 2>/dev/null && \
+    git commit -qm "gsd-lite(loop): auto-BLOCKED ($2)" ||
+    echo "gsd-lite: WARN failed to commit the auto-BLOCKED state（git 識別や hook を確認。作業ツリーの $STATE は blocked のまま）" >&2
+  finish 2
+}
+
+check_updated_at() { # コミット済み state の updated_at が HEAD のコミット時刻より先なら警告する（値は直さない）
+  local stamp stamp_s commit_s
+  stamp=$(committed_state '.updated_at // empty')
+  [ -n "$stamp" ] || return 0
+  stamp_s=$(date -d "$stamp" +%s 2>/dev/null) || return 0   # ISO 8601 でなければ判定しない
+  commit_s=$(git show -s --format=%ct HEAD 2>/dev/null) || return 0
+  if [ "$stamp_s" -gt $((commit_s + 300)) ]; then
+    echo "gsd-lite: WARN state.updated_at ($stamp) is $(( (stamp_s - commit_s) / 60 )) min after the commit time — the turn likely estimated the time instead of running date" >&2
+  fi
+}
 
 run_hook() { # run_hook <name> <args...> — フックの失敗は無視。ロック FD は継承させない
   local hook="$GSD_DIR/hooks/$1"; shift
@@ -699,28 +732,36 @@ while true; do
   git checkout HEAD -- "$STATE" || die "failed to restore $STATE from HEAD"
 
   if [ "$turn_after" -le "$turn_before" ]; then
+    # 利用上限で落ちたターンは詰まりではないので retry を増やさず、待ってから同じターンをやり直す
+    if grep -Eqi -- "$LIMIT_PATTERN" "$log" 2>/dev/null; then
+      limit_retry=$(( $(get_limit_retry) + 1 ))
+      limit_max="${GSD_LITE_LIMIT_MAX:-8}"
+      if [ "$limit_retry" -gt "$limit_max" ]; then
+        echo "gsd-lite: usage limit persisted for $limit_max waits — auto-BLOCKED (see $MS_DIR/BLOCKED.md)" >&2
+        set_limit_retry 0
+        auto_block "利用上限（session / usage / rate limit）で $limit_max 回続けて待機しても進捗がありませんでした。最後のログ: $log" "usage limit persisted"
+      fi
+      set_limit_retry "$limit_retry"
+      echo "gsd-lite: usage limit hit (wait $limit_retry/$limit_max, retry stays $retry) — sleeping ${GSD_LITE_LIMIT_WAIT:-900}s — see $log" >&2
+      sleep "${GSD_LITE_LIMIT_WAIT:-900}"
+      continue
+    fi
+    set_limit_retry 0
     retry=$((retry + 1))
     retry_max=$(sget '.retry_max')
     echo "gsd-lite: no committed progress (rc=$rc, attempt $retry/$((retry_max + 1))) — see $log" >&2
     if [ "$retry" -gt "$retry_max" ]; then
       echo "gsd-lite: turn made no progress after $retry attempts — auto-BLOCKED (see $MS_DIR/BLOCKED.md)" >&2
-      supdate '.next_command = "BLOCKED" | .phase = "blocked"'
-      {
-        echo "# BLOCKED (auto)"
-        echo ""
-        echo "ループが自動生成した BLOCKED です。ターンが state.json を（コミットまで含めて）"
-        echo "更新せずに $retry 回連続で終了しました。最後のログ: $log"
-      } > "$MS_DIR/BLOCKED.md"
-      git add "$STATE" "$MS_DIR/BLOCKED.md" 2>/dev/null && \
-        git commit -qm "gsd-lite(loop): auto-BLOCKED (no progress after $retry attempts)" ||
-        echo "gsd-lite: WARN failed to commit the auto-BLOCKED state（git 識別や hook を確認。作業ツリーの $STATE は blocked のまま）" >&2
-      finish 2
+      auto_block "ループが自動生成した BLOCKED です。ターンが state.json を（コミットまで含めて）
+更新せずに $retry 回連続で終了しました。最後のログ: $log" "no progress after $retry attempts"
     fi
     set_retry "$retry"
     sleep 2
     continue
   fi
   set_retry 0
+  set_limit_retry 0
+  check_updated_at
   if [ "$rc" -ne 0 ]; then
     echo "gsd-lite: WARN turn advanced in committed state but rc=$rc — push 等の後処理が失敗した可能性。$log を確認" >&2
   fi
