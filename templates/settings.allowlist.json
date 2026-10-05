@@ -32,6 +32,7 @@
       "Bash(diff:*)",
       "Bash(sort:*)",
       "Bash(uniq:*)",
+      "Bash(gsd-lite-loop.sh --where:*)",
       "WebSearch",
       "WebFetch(domain:*)",
       "Read(~/workspaces/**)"

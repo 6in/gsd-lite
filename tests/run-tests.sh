@@ -883,6 +883,9 @@ assert_eq "where off a milestone branch fails" "$?" "6"
 git checkout -q gsd-lite/toy
 "$LOOP" --bogus > "$TESTROOT/where.log" 2>&1
 grep -q -- '--where' "$TESTROOT/where.log" && ok "usage lists --where" || ng "usage missing --where"
+# 各フェーズのスキルが冒頭で --where を呼ぶので、無人ターンの allowlist に入っていること
+jq -e '.permissions.allow | index("Bash(gsd-lite-loop.sh --where:*)")' "$REPO_DIR/templates/settings.allowlist.json" >/dev/null \
+  && ok "allowlist template permits --where" || ng "allowlist template missing --where"
 
 echo "== Test 35: Claude Code の trust 検証 =="
 fake_home="$TESTROOT/home35"; mkdir -p "$fake_home"
