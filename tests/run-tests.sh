@@ -1072,5 +1072,29 @@ GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-tokens" "$LOOP" > "$TESTROOT/loop-out.lo
 assert_eq "codex total tokens" "$(jq -c '.usage' .gsd-lite/logs/toy/turns.jsonl | head -n 1)" '{"total_tokens":17698}'
 ls .gsd-lite/logs/toy/turn-*-attempt*.jsonl >/dev/null 2>&1 && ng "codex wrote an event log" || ok "codex keeps the plain log only"
 
+echo "== Test 41: 承認待ちのあったターンは PROGRESS に件数と要約を追記してコミットする =="
+cat > "$TESTROOT/bin/claude-denied" <<'EOF2'
+#!/usr/bin/env bash
+"$(dirname "$0")/claude-happy" "$@" > /dev/null
+cat <<'JSON'
+{"type":"system","subtype":"init","tools":["Bash"]}
+{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"done","usage":{"input_tokens":1,"output_tokens":1},"permission_denials":[{"tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"/usr/bin/ps -eo pid,cmd book/private/secret.txt"}},{"tool_name":"Bash","tool_use_id":"t2","tool_input":{"command":"  ps aux --sort=-%cpu"}},{"tool_name":"Write","tool_use_id":"t3","tool_input":{"file_path":"book/private/x.md","content":"x"}}]}
+JSON
+EOF2
+chmod +x "$TESTROOT/bin/claude-denied"
+make_project "$TESTROOT/u41"
+printf '# PROGRESS\n' > .gsd-lite/PROGRESS.md
+git add .gsd-lite/PROGRESS.md && git commit -qm "progress"
+commit_state '.max_turns=1'
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-denied" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "denial line appended" "$(tail -n 1 .gsd-lite/PROGRESS.md)" "- 承認待ち（ループ計測・turn 1）: 3 件 — Bash: ps ×2, Write"
+grep -q 'book/private' .gsd-lite/PROGRESS.md && ng "PROGRESS leaks denial arguments" || ok "PROGRESS keeps only the head word"
+assert_eq "denial line committed" "$(git log -1 --format=%s)" "gsd-lite(loop): turn 1 の承認待ち 3 件を PROGRESS に追記"
+git diff --quiet HEAD && ok "work tree clean after append" || ng "work tree dirty after append"
+assert_eq "turns.jsonl denial heads" "$(jq -c 'select(.turn==1) | .permission_denial_heads' .gsd-lite/logs/toy/turns.jsonl)" '["Bash: ps","Bash: ps","Write"]'
+assert_eq "turns.jsonl denial inputs kept" "$(jq -r 'select(.turn==1) | .permission_denial_inputs | length' .gsd-lite/logs/toy/turns.jsonl)" "3"
+out=$("$LOOP" --status)
+echo "$out" | grep -q '^verify    : 差し戻し 0/2（次の verify は round 1）' && ok "status shows rejections and next round" || ng "status verify line"
+
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

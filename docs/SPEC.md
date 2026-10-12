@@ -444,7 +444,8 @@ PLAN.md のタスク形式:
      いたら `branch.base` へ戻り、リモートがあれば pull、前回 MR 未マージなら AUQ で確認）。
      CLI 不在・未認証・ホスト不明・push 失敗は状況を BLOCKED.md に書いて BLOCKED
 3. **指摘あり**: 修正タスクを `PLAN.md` に `- [ ] F1: ...` 形式で追記し、
-   `verify_round` をインクリメント。
+   `verify_round` をインクリメント（`verify_round` = 差し戻しの回数。verify の round 番号は `verify_round + 1`。
+   `fix_round` は discuss で始めた人の修正ラウンドの番号で、ここでは増えない）。
    - `verify_round <= verify_round_max` → `next_command: "/gsd-lite-impl"`（差し戻し）
    - 上限超過 → BLOCKED（無限修正ループ防止）
 
