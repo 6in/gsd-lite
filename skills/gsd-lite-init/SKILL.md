@@ -9,6 +9,12 @@ disable-model-invocation: true
 足場の生成のみを行う。要件の中身には踏み込まない（それは /gsd-lite-discuss の仕事）。
 実行中のホストに応じて以下を使う（install.sh が配置済み）。
 
+**Claude Code のプラグインとして入れた場合**（このスキルを `/gsd-lite:gsd-lite-init` で呼んだ場合）は、
+install.sh をまだ実行していないので、手順 1 の前提確認が最初にプラグイン同梱の install.sh を呼んで
+ループ本体（`~/.local/bin/gsd-lite-loop.sh`）と雛形（`~/.claude/gsd-lite/templates/`）を配置する
+（出力に `PLUGIN_SYNCED`）。プラグインを更新した後も、このスキルを呼べば同じ手順で最新に揃う。
+以降の手順・パスは install.sh で入れた場合と同じ。
+
 2 つの形がある。どちらも `state.target.path` が「コードを書く対象」を指す:
 
 | 形 | 場所 | 向いている状況 |
@@ -42,6 +48,7 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
 
 1. **前提確認**（1 回の Bash でまとめて実行し、結果を見てから進む）:
    ```bash
+   [ -x "${CLAUDE_PLUGIN_ROOT}/install.sh" ] && "${CLAUDE_PLUGIN_ROOT}/install.sh" --skip-init-skill --engine claude >/dev/null && echo "PLUGIN_SYNCED"
    git rev-parse --show-toplevel 2>/dev/null || echo "NOT_GIT"
    git var GIT_COMMITTER_IDENT >/dev/null 2>&1 && echo "IDENT_OK" || echo "NO_IDENT"
    command -v jq >/dev/null && echo "JQ_OK" || echo "NO_JQ"
@@ -53,7 +60,9 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
    - `NOT_GIT` なら `git init` を提案して実行
    - `NO_IDENT` ならループも各ターンも state をコミットできず無進捗で止まるので、
      この時点で `user.name` / `user.email` を設定してもらう
-   - `NO_JQ` / `NO_LOOP` なら導入方法を案内して中断
+   - `NO_JQ` / `NO_LOOP` なら導入方法を案内して中断。`PLUGIN_SYNCED` が出たのに `NO_LOOP` なら
+     `~/.local/bin` が PATH に無い（ループは無人ターンの外、ユーザーのターミナルから起動するので PATH に要る）。
+     `export PATH="$HOME/.local/bin:$PATH"` をシェルの設定に足してもらう
 2. **既存チェック**: `.gsd-lite/state.json`（in-repo）または `.gsd-lite/config.json`（gsd-control）が
    既にあればセットアップ済み。その場合は
    AskUserQuestion で「**スキル・allowlist を最新テンプレートに更新するか**」を確認する

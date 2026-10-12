@@ -1,0 +1,10 @@
+{
+  "name": "gsd-lite",
+  "version": "1.0.0",
+  "description": "discuss だけ対話し、research → plan → impl → verify → reflect を無人ループで回す軽量ワークフロー。/gsd-lite:gsd-lite-init がループ本体と雛形を配置し、プロジェクトに足場を作る",
+  "author": {
+    "name": "ohya"
+  },
+  "repository": "https://github.com/6in/gsd-lite",
+  "keywords": ["workflow", "autonomous-loop", "planning", "skill", "gsd"]
+}

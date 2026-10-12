@@ -4,10 +4,14 @@
 #  - skills/gsd-lite-init  → ~/.claude/skills/（Codex: ~/.agents/skills/、OpenCode: ~/.config/opencode/skills/）
 #  - templates/            → ~/.claude/gsd-lite/templates/（Codex: ~/.codex/gsd-lite/、OpenCode: ~/.config/opencode/gsd-lite/）
 #  - opencode/commands/    → ~/.config/opencode/commands/（OpenCode の /gsd-lite-init, /gsd-lite-discuss, /gsd-lite-reflect）
+# --skip-init-skill: init スキルをコピーしない。Claude Code のプラグインとして入れた場合に、プラグイン側の
+# init スキル（/gsd-lite:gsd-lite-init）がループ本体と雛形だけを配置するために使う
 set -eu
 
 REPO_DIR=$(cd "$(dirname "$0")" && pwd)
 
+SKIP_INIT_SKILL=0
+if [ "${1:-}" = --skip-init-skill ]; then SKIP_INIT_SKILL=1; shift; fi
 ENGINE=claude
 case "$#:$*" in
   0:) ;;
@@ -15,8 +19,8 @@ case "$#:$*" in
   '2:--engine codex') ENGINE=codex ;;
   '2:--engine opencode') ENGINE=opencode ;;
   '2:--engine all') ENGINE=all ;;
-  '1:--help') echo "Usage: $0 [--engine claude|codex|opencode|all]"; exit 0 ;;
-  *) echo "Usage: $0 [--engine claude|codex|opencode|all]" >&2; exit 1 ;;
+  '1:--help') echo "Usage: $0 [--skip-init-skill] [--engine claude|codex|opencode|all]"; exit 0 ;;
+  *) echo "Usage: $0 [--skip-init-skill] [--engine claude|codex|opencode|all]" >&2; exit 1 ;;
 esac
 # テスト・任意配置用。HOME / CODEX_HOME 自体は変更しない。
 INSTALL_ROOT="${GSD_LITE_INSTALL_ROOT:-$HOME}"
@@ -39,9 +43,12 @@ install_engine() {
       skill_dir="$INSTALL_ROOT/.claude/skills"
       data_dir="$INSTALL_ROOT/.claude/gsd-lite" ;;
   esac
-  install -d "$skill_dir" "$data_dir"
-  rm -rf "$skill_dir/gsd-lite-init"
-  cp -r "$REPO_DIR/skills/gsd-lite-init" "$skill_dir/"
+  install -d "$data_dir"
+  if [ "$SKIP_INIT_SKILL" = 0 ]; then
+    install -d "$skill_dir"
+    rm -rf "$skill_dir/gsd-lite-init"
+    cp -r "$REPO_DIR/skills/gsd-lite-init" "$skill_dir/"
+  fi
   rm -rf "$data_dir/templates"
   cp -r "$REPO_DIR/templates" "$data_dir/templates"
   if [ "$engine" != claude ]; then
@@ -49,7 +56,7 @@ install_engine() {
     jq --arg engine "$engine" '.defaults.engine = $engine' "$REPO_DIR/templates/config.json" > "$data_dir/templates/config.json"
     rm "$data_dir/templates/settings.allowlist.json"
   fi
-  echo "  $engine skill     : $skill_dir/gsd-lite-init"
+  [ "$SKIP_INIT_SKILL" = 1 ] || echo "  $engine skill     : $skill_dir/gsd-lite-init"
   echo "  $engine templates : $data_dir/templates"
   if [ "$engine" = opencode ]; then
     # OpenCode はスキルを / コマンドで呼べないので、スキルを読み込む薄いコマンドを置く

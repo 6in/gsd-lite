@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "gsd-lite",
+  "description": "gsd-lite（無人ループで回す軽量開発ワークフロー）のマーケットプレイス",
+  "owner": {
+    "name": "ohya"
+  },
+  "plugins": [
+    {
+      "name": "gsd-lite",
+      "description": "discuss だけ対話し、research → plan → impl → verify → reflect を無人ループで回す軽量ワークフロー",
+      "version": "1.0.0",
+      "author": {
+        "name": "ohya"
+      },
+      "category": "development",
+      "source": "./"
+    }
+  ]
+}

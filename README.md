@@ -19,6 +19,29 @@ research → plan → impl → verify → 仕上げ（ローカルのみなら�
 ./install.sh
 ```
 
+### Claude Code のプラグインとして入れる
+
+リポジトリを clone せずに、Claude Code のマーケットプレイス経由でも入れられる（Claude 用のみ。
+Codex / OpenCode は上の `install.sh --engine ...` を使う）:
+
+```
+/plugin marketplace add 6in/gsd-lite
+/plugin install gsd-lite@gsd-lite
+```
+
+プラグインが提供するのは init スキルだけで、呼び出しは名前空間つきの **`/gsd-lite:gsd-lite-init`** になる。
+init は最初にプラグイン同梱の `install.sh --skip-init-skill` を実行して、ループ本体を `~/.local/bin/` に、
+雛形を `~/.claude/gsd-lite/templates/` に配置する（`~/.local/bin` が PATH に無ければ足す — ループは
+ユーザーのターミナルから起動する）。以降は `install.sh` で入れた場合と同じで、プロジェクトに配られる
+6 スキルは `/gsd-lite-discuss` などの名前のまま使う。
+
+- 更新: `/plugin marketplace update gsd-lite` → `/plugin update gsd-lite@gsd-lite` のあと、
+  `/gsd-lite:gsd-lite-init` を呼ぶとループ本体と雛形が最新に揃う（既存プロジェクトでは続けて
+  「スキル・allowlist を最新テンプレートに更新」を選ぶ）
+- `install.sh` と併用すると `/gsd-lite-init` と `/gsd-lite:gsd-lite-init` の両方が見える。中身は同じなので
+  どちらを呼んでもよいが、片方に寄せるなら `~/.claude/skills/gsd-lite-init` を消すかプラグインを外す
+- リリース時は `.claude-plugin/plugin.json` と `marketplace.json` の `version` を揃えて上げる
+
 ## 使い方（要約）
 
 作業場所の形は 2 つ。1 人で使うなら **in-repo 形**（対象リポジトリの中で直接動かす・既定）、
