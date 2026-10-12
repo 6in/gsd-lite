@@ -54,8 +54,11 @@
 # 計測: 各試行の phase / engine / model / attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 /
 # 増えたコミット数を logs/<milestone>/turns.jsonl に 1 行ずつ追記する（reflect フェーズの客観材料）。
 # エンジンが報告した場合は usage（トークン量）/ cost_usd / num_turns / permission_denials（承認待ちで
-# 拒否されたツール）/ rate_limit（利用枠の使用率）も同じ行に入る（Claude: stream-json の result、
+# 拒否されたツール）/ permission_denial_heads・permission_denial_inputs（その要約と入力の先頭）/
+# rate_limit（利用枠の使用率）も同じ行に入る（Claude: stream-json の result、
 # Codex: ログ末尾の「tokens used」の合計のみ、OpenCode: なし）。
+# 承認待ちが 1 件以上あった進んだターンは、PROGRESS.md の末尾に件数と要約（ツール名 ＋ Bash ならコマンドの
+# 先頭 1 語。引数やパスは書かない）を追記して `gsd-lite(loop):` でコミットする。
 #
 # 作業場所（2 つの形。どちらも state.target.path が「コードを書く対象」を指す）:
 #   in-repo（従来）: .gsd-lite/state.json があるリポジトリ。target.path は "."（未指定も同じ）。
@@ -219,7 +222,14 @@ turn_usage() { # このターンでエンジンが報告した使用量を JSON 
                     cache_read_input_tokens: $e.usage.cache_read_input_tokens,
                     cache_creation_input_tokens: $e.usage.cache_creation_input_tokens},
             cost_usd: $e.total_cost_usd, num_turns: $e.num_turns, duration_api_ms: $e.duration_api_ms,
-            is_error: $e.is_error, permission_denials: [$e.permission_denials[]?.tool_name]}
+            is_error: $e.is_error, permission_denials: [$e.permission_denials[]?.tool_name],
+            # 拒否された呼び出しの要約。heads は PROGRESS に書く短い形（ツール名 ＋ Bash ならコマンドの先頭 1 語。
+            # 引数やパスは書かない）。inputs は turns.jsonl（git 管理外）だけに残す入力の先頭
+            permission_denial_heads: [$e.permission_denials[]? | .tool_name + (
+              if .tool_name == "Bash" then (.tool_input.command // "" | tostring | sub("^\\s+"; "")
+                | split(" ")[0] | split("/") | last | gsub("[^A-Za-z0-9._+-]"; "") | if . == "" then "" else ": " + . end)
+              else "" end)],
+            permission_denial_inputs: [$e.permission_denials[]? | (.tool_input // {} | tostring | .[0:160])]}
           elif $e.type == "rate_limit_event" then . + {rate_limit: ($e.rate_limit_info
             | {status, type: .rateLimitType, resets_at: .resetsAt,
                five_hour: .unifiedWindows.five_hour.utilization, seven_day: .unifiedWindows.seven_day.utilization})}
@@ -242,6 +252,23 @@ report_usage() { # 使用量と権限拒否を 1 行で知らせる（loop.log �
   local denied
   denied=$(echo "$usage_json" | jq -r '(.permission_denials // []) | if length > 0 then "\(length) (\(unique | join(", ")))" else empty end')
   [ -z "$denied" ] || echo "gsd-lite: WARN turn $((turn_before + 1)) had permission denials: $denied — allowlist（.claude/settings.json）に足すか、そのツールを deny して使わせない" >&2
+}
+
+append_denials() { # 承認待ちが 1 件以上あった進んだターンだけ、PROGRESS の末尾に件数と要約を追記してコミットする
+  local n heads progress="$MS_DIR/PROGRESS.md"
+  n=$(echo "$usage_json" | jq -r '(.permission_denials // []) | length' 2>/dev/null)
+  [ "${n:-0}" -gt 0 ] || return 0
+  [ -f "$progress" ] || return 0
+  # エージェントが PROGRESS を書きかけのまま残していたら混ぜない（そのターンのコミットを優先する）
+  if ! git diff --quiet HEAD -- "$progress" 2>/dev/null || ! git diff --cached --quiet -- 2>/dev/null; then
+    echo "gsd-lite: WARN PROGRESS.md または索引に未コミットの変更があるため、承認待ちの追記を見送った（turns.jsonl には記録済み）" >&2
+    return 0
+  fi
+  heads=$(echo "$usage_json" | jq -r '(.permission_denial_heads // .permission_denials // []) | group_by(.) | map(if length > 1 then "\(.[0]) ×\(length)" else .[0] end) | join(", ")')
+  printf -- '- 承認待ち（ループ計測・turn %s）: %s 件 — %s\n' "$((turn_before + 1))" "$n" "$heads" >> "$progress"
+  git add "$progress" 2>/dev/null && \
+    git commit -qm "gsd-lite(loop): turn $((turn_before + 1)) の承認待ち $n 件を PROGRESS に追記" ||
+    echo "gsd-lite: WARN 承認待ちの追記をコミットできなかった（作業ツリーの $progress を確認）" >&2
 }
 
 record_turn() { # 1 試行ぶんの計測値を logs/<milestone>/turns.jsonl に追記（reflect の客観材料）
@@ -549,7 +576,7 @@ status() {
     fi
   fi
   echo "engine    : ${GSD_LITE_ENGINE:-$(sget '.engine // "claude"')}"
-  jq -r '"milestone : \(.milestone)\nphase     : \(.phase)\nturn      : \(.turn)/\(.max_turns)\nnext      : \(.next_command)\nverify    : round \(.verify_round)/\(.verify_round_max)\nbranch    : \(.branch.name) (base: \(.branch.base))\nupdated   : \(.updated_at)"' "$STATE"
+  jq -r '"milestone : \(.milestone)\nphase     : \(.phase)\nturn      : \(.turn)/\(.max_turns)\nnext      : \(.next_command)\nverify    : 差し戻し \(.verify_round)/\(.verify_round_max)（次の verify は round \(.verify_round + 1)）\nbranch    : \(.branch.name) (base: \(.branch.base))\nupdated   : \(.updated_at)"' "$STATE"
   for display_phase in $PHASES; do
     display_engine=$(engine_for "$display_phase")
     display_model=$(model_for "$display_engine" "$display_phase")
@@ -822,6 +849,7 @@ while true; do
   report_usage
   # ターン境界の正規化: 作業ツリーの state を HEAD に揃える（未コミットの書きかけを残さない）
   git checkout HEAD -- "$STATE" || die "failed to restore $STATE from HEAD"
+  [ "$turn_after" -le "$turn_before" ] || append_denials
 
   if [ "$turn_after" -le "$turn_before" ]; then
     # 利用上限で落ちたターンは詰まりではないので retry を増やさず、待ってから同じターンをやり直す
