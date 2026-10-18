@@ -1112,7 +1112,7 @@ grep -q 'claude skill' "$TESTROOT/install.log" && ng "skill line printed with --
 "$REPO_DIR/install.sh" --skip-init-skill --bogus > /dev/null 2>&1
 assert_eq "bad args still rejected" "$?" "1"
 
-echo "== Test 43: 資源の上限（GSD_LITE_MEMORY_MAX / GSD_LITE_CPU_QUOTA、任意）で systemd の scope に入り直す =="
+echo "== Test 43: 資源の上限（state.limits と GSD_LITE_MEMORY_MAX / GSD_LITE_CPU_QUOTA、任意）で systemd の scope に入り直す =="
 # systemd-run のスタブ: 引数を記録し、-- の後ろをそのまま exec する（本物の --scope と同じく PID を変えない）
 cat > "$TESTROOT/bin/systemd-run-stub" <<'EOF'
 #!/usr/bin/env bash
@@ -1166,11 +1166,48 @@ out=$(GSD_LITE_USER_CGROUP="$cgroup_mem" GSD_LITE_SYSTEMD_RUN="$TESTROOT/bin/sys
 echo "$out" | grep -q '^limits    : next start in a systemd scope (MemoryMax=8G MemorySwapMax=0)' && ok "status shows planned limits" || ng "status planned limits"
 echo "$out" | grep -q '^            WARN cpu controller is not enabled' && ok "status shows the cpu warning" || ng "status cpu warning"
 out=$("$LOOP" --status)
-echo "$out" | grep -q '^limits    : off ' && ok "status shows limits off" || ng "status limits off"
+echo "$out" | grep -q '^limits    : off (state.limits empty' && ok "status shows limits off" || ng "status limits off"
 out=$(GSD_LITE_USER_CGROUP="$cgroup_full" GSD_LITE_SYSTEMD_RUN="$TESTROOT/bin/systemd-run-stub" GSD_LITE_CPU_QUOTA=150% "$LOOP" --check)
 echo "$out" | grep -q '^limits    : next start in a systemd scope (CPUQuota=150%)' && ok "check shows planned limits" || ng "check planned limits"
 GSD_LITE_MEMORY_MAX=lots "$LOOP" --check > /dev/null 2>&1
 assert_eq "check rejects a bad value" "$?" "6"
+# state.json の limits（discuss が選んで保存する）。環境変数が優先し、off で外せる
+make_project "$TESTROOT/b43"
+commit_state '.limits={"memory_max":"","cpu_quota":""}'
+run_limited "$cgroup_full"
+assert_eq "empty state.limits: systemd-run not used" "$(jq -r .phase .gsd-lite/state.json)/$(wc -l < "$STUB_RUN_LOG")" "done/0"
+make_project "$TESTROOT/b43"
+commit_state '.limits={"memory_max":"6G","cpu_quota":"150%","memory_swap_max":"1G"}'
+run_limited "$cgroup_full"
+assert_eq "state.limits run completes" "$(jq -r .phase .gsd-lite/state.json)" "done"
+grep -q -- "-p MemoryMax=6G -p MemorySwapMax=1G -p CPUQuota=150% -- " "$STUB_RUN_LOG" && ok "limits read from state" || ng "state limits: $(cat "$STUB_RUN_LOG")"
+make_project "$TESTROOT/b43"
+commit_state '.limits={"memory_max":"6G","cpu_quota":"150%"}'
+run_limited "$cgroup_full" GSD_LITE_MEMORY_MAX=2G
+grep -q -- "-p MemoryMax=2G -p MemorySwapMax=0 -p CPUQuota=150% -- " "$STUB_RUN_LOG" && ok "env overrides state per key" || ng "env override: $(cat "$STUB_RUN_LOG")"
+make_project "$TESTROOT/b43"
+commit_state '.limits={"memory_max":"6G","cpu_quota":"150%"}'
+run_limited "$cgroup_full" GSD_LITE_CPU_QUOTA=off
+grep -q -- "-p MemoryMax=6G -p MemorySwapMax=0 -- " "$STUB_RUN_LOG" && ok "off drops one limit" || ng "off one: $(cat "$STUB_RUN_LOG")"
+make_project "$TESTROOT/b43"
+commit_state '.limits={"memory_max":"6G","cpu_quota":"150%"}'
+run_limited "$cgroup_full" GSD_LITE_MEMORY_MAX=off GSD_LITE_CPU_QUOTA=off
+assert_eq "off for both: no scope" "$(jq -r .phase .gsd-lite/state.json)/$(wc -l < "$STUB_RUN_LOG")" "done/0"
+make_project "$TESTROOT/b43"
+commit_state '.limits={"cpu_quota":200}'
+run_limited "$cgroup_full"
+assert_eq "bad state value is a precondition error" "$?" "6"
+grep -q 'invalid cpu quota: 200 (GSD_LITE_CPU_QUOTA or state.limits.cpu_quota' "$TESTROOT/limits-out.log" && ok "error names the state key" || ng "state error message"
+make_project "$TESTROOT/b43"
+commit_state '.limits="8G"'
+run_limited "$cgroup_full"
+assert_eq "malformed state.limits is ignored" "$(jq -r .phase .gsd-lite/state.json)/$(wc -l < "$STUB_RUN_LOG")" "done/0"
+make_project "$TESTROOT/b43"
+commit_state '.limits={"memory_max":"6G"}'
+out=$(GSD_LITE_USER_CGROUP="$cgroup_full" GSD_LITE_SYSTEMD_RUN="$TESTROOT/bin/systemd-run-stub" "$LOOP" --status)
+echo "$out" | grep -q '^limits    : next start in a systemd scope (MemoryMax=6G MemorySwapMax=0)' && ok "status shows limits from state" || ng "status state limits"
+assert_eq "template state has empty limits" "$(jq -c .limits "$REPO_DIR/templates/state.json")" '{"memory_max":"","cpu_quota":""}'
+assert_eq "template config defaults have empty limits" "$(jq -c .defaults.limits "$REPO_DIR/templates/config.json")" '{"memory_max":"","cpu_quota":""}'
 unset STUB_RUN_LOG
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"

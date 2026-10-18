@@ -51,7 +51,10 @@
 #                              turn-NNN-attemptN.log に書き出し、トークン量などを turns.jsonl に記録する。
 #                              off なら従来どおり平文の .log だけ（トークン量は記録されない）
 #   GSD_LITE_MEMORY_MAX        任意。ループ全体（ターンの CLI・テスト・ビルドを含む）のメモリ上限（例 8G、75%）。
-#   GSD_LITE_CPU_QUOTA         任意。ループ全体の CPU 上限（例 200% = 2 コア分）。どちらかを設定すると、
+#                              未設定なら state.limits.memory_max（discuss が選んで保存する）を使う。
+#                              off なら state に書いてあっても付けない
+#   GSD_LITE_CPU_QUOTA         任意。ループ全体の CPU 上限（例 200% = 2 コア分）。未設定なら state.limits.cpu_quota、
+#                              off なら付けない。メモリか CPU の上限が 1 つでも決まると、
 #                              起動時に自分を `systemd-run --user --scope` の中で起動し直す。上限を超えても
 #                              止まる・遅くなるのはループ配下だけで、マシン全体は固まらない。
 #                              systemd が使えない、またはユーザーの systemd がそのコントローラを有効にして
@@ -60,8 +63,8 @@
 #                              /etc/systemd/system/user@.service.d/delegate.conf に
 #                              `[Service]` と `Delegate=cpu cpuset io memory pids` を書き、OS を再起動する
 #                              （daemon-reload だけでは足りない。判定は user@<uid>.service の cgroup.subtree_control）
-#   GSD_LITE_MEMORY_SWAP_MAX   GSD_LITE_MEMORY_MAX を使うときの swap 上限（デフォルト 0。ループに swap を使わせず、
-#                              マシンの swap を他のプロセスのために残す）
+#   GSD_LITE_MEMORY_SWAP_MAX   メモリ上限を使うときの swap 上限（未設定なら state.limits.memory_swap_max、それも
+#                              無ければ 0。ループに swap を使わせず、マシンの swap を他のプロセスのために残す）
 #
 # 計測: 各試行の phase / engine / model / attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 /
 # 増えたコミット数を logs/<milestone>/turns.jsonl に 1 行ずつ追記する（reflect フェーズの客観材料）。
@@ -563,21 +566,36 @@ trust_summary() { # --status / --check 用の 1 行
   esac
 }
 
-limits_requested() { [ -n "${GSD_LITE_MEMORY_MAX:-}" ] || [ -n "${GSD_LITE_CPU_QUOTA:-}" ]; }
+state_limit() { # state_limit <key> — state.json の limits.<key>（無い・空・不正な形なら空）
+  jq -r --arg key "$1" '(.limits // {})[$key] // empty | tostring' "$STATE" 2>/dev/null
+}
+
+resolve_limits() { # 上限の実効値を LIM_MEM / LIM_SWAP / LIM_CPU に決める。環境変数 → state.limits → なし
+  # 環境変数の "off" は「state に書いてあっても付けない」
+  LIM_MEM="${GSD_LITE_MEMORY_MAX:-$(state_limit memory_max)}"
+  LIM_SWAP="${GSD_LITE_MEMORY_SWAP_MAX:-$(state_limit memory_swap_max)}"
+  LIM_CPU="${GSD_LITE_CPU_QUOTA:-$(state_limit cpu_quota)}"
+  [ "$LIM_MEM" != off ] || LIM_MEM=""
+  [ "$LIM_CPU" != off ] || LIM_CPU=""
+}
+
+limits_requested() { resolve_limits; [ -n "$LIM_MEM" ] || [ -n "$LIM_CPU" ]; }
 
 check_limit_values() { # 書式が不正なら die（打ち間違いで黙って上限なしにしない）
   local size='^[0-9]+[KMGT]?$|^[0-9]+%$'
-  [ -z "${GSD_LITE_MEMORY_MAX:-}" ] || [[ "$GSD_LITE_MEMORY_MAX" =~ $size ]] ||
-    die "invalid GSD_LITE_MEMORY_MAX: $GSD_LITE_MEMORY_MAX (e.g. 8G, 512M, 75%)"
-  [ -z "${GSD_LITE_MEMORY_SWAP_MAX:-}" ] || [[ "$GSD_LITE_MEMORY_SWAP_MAX" =~ $size ]] ||
-    die "invalid GSD_LITE_MEMORY_SWAP_MAX: $GSD_LITE_MEMORY_SWAP_MAX (e.g. 0, 2G)"
-  [ -z "${GSD_LITE_CPU_QUOTA:-}" ] || [[ "$GSD_LITE_CPU_QUOTA" =~ ^[0-9]+%$ ]] ||
-    die "invalid GSD_LITE_CPU_QUOTA: $GSD_LITE_CPU_QUOTA (e.g. 200% = 2 cores)"
+  resolve_limits
+  [ -z "$LIM_MEM" ] || [[ "$LIM_MEM" =~ $size ]] ||
+    die "invalid memory limit: $LIM_MEM (GSD_LITE_MEMORY_MAX or state.limits.memory_max; e.g. 8G, 512M, 75%, off)"
+  [ -z "$LIM_SWAP" ] || [[ "$LIM_SWAP" =~ $size ]] ||
+    die "invalid swap limit: $LIM_SWAP (GSD_LITE_MEMORY_SWAP_MAX or state.limits.memory_swap_max; e.g. 0, 2G)"
+  [ -z "$LIM_CPU" ] || [[ "$LIM_CPU" =~ ^[0-9]+%$ ]] ||
+    die "invalid cpu quota: $LIM_CPU (GSD_LITE_CPU_QUOTA or state.limits.cpu_quota; e.g. 200% = 2 cores, off)"
 }
 
 plan_limits() { # 効かせられる上限を LIMIT_PROPS（systemd-run の -p 引数）に、効かない理由を LIMIT_WARNS に入れる
   LIMIT_PROPS=(); LIMIT_WARNS=()
   local controllers
+  resolve_limits
   if ! command -v "$SYSTEMD_RUN" >/dev/null 2>&1; then
     LIMIT_WARNS+=("systemd-run not found — limits need systemd (WSL2 without systemd / macOS are not supported)")
     return 1
@@ -588,16 +606,16 @@ plan_limits() { # 効かせられる上限を LIMIT_PROPS（systemd-run の -p �
     LIMIT_WARNS+=("cannot read $USER_CGROUP/cgroup.subtree_control — the user systemd (cgroup v2) is not available")
     return 1
   fi
-  if [ -n "${GSD_LITE_MEMORY_MAX:-}" ]; then
+  if [ -n "$LIM_MEM" ]; then
     case " $controllers " in
-      *" memory "*) LIMIT_PROPS+=(-p "MemoryMax=$GSD_LITE_MEMORY_MAX" -p "MemorySwapMax=${GSD_LITE_MEMORY_SWAP_MAX:-0}") ;;
-      *) LIMIT_WARNS+=("memory controller is not enabled in the user systemd — GSD_LITE_MEMORY_MAX is ignored") ;;
+      *" memory "*) LIMIT_PROPS+=(-p "MemoryMax=$LIM_MEM" -p "MemorySwapMax=${LIM_SWAP:-0}") ;;
+      *) LIMIT_WARNS+=("memory controller is not enabled in the user systemd — the memory limit is ignored") ;;
     esac
   fi
-  if [ -n "${GSD_LITE_CPU_QUOTA:-}" ]; then
+  if [ -n "$LIM_CPU" ]; then
     case " $controllers " in
-      *" cpu "*) LIMIT_PROPS+=(-p "CPUQuota=$GSD_LITE_CPU_QUOTA") ;;
-      *) LIMIT_WARNS+=("cpu controller is not enabled in the user systemd — GSD_LITE_CPU_QUOTA is ignored (put \`Delegate=cpu cpuset io memory pids\` under [Service] in /etc/systemd/system/user@.service.d/delegate.conf and reboot; a daemon-reload alone is not enough)") ;;
+      *" cpu "*) LIMIT_PROPS+=(-p "CPUQuota=$LIM_CPU") ;;
+      *) LIMIT_WARNS+=("cpu controller is not enabled in the user systemd — the cpu quota is ignored (put \`Delegate=cpu cpuset io memory pids\` under [Service] in /etc/systemd/system/user@.service.d/delegate.conf and reboot; a daemon-reload alone is not enough)") ;;
     esac
   fi
   [ "${#LIMIT_PROPS[@]}" -gt 0 ]
@@ -646,7 +664,7 @@ limits_summary() { # --status / --check 用の 1 行
     fi
     for warn in "${LIMIT_WARNS[@]}"; do echo "            WARN $warn"; done
   else
-    echo "limits    : off (GSD_LITE_MEMORY_MAX / GSD_LITE_CPU_QUOTA unset)"
+    echo "limits    : off (state.limits empty and GSD_LITE_MEMORY_MAX / GSD_LITE_CPU_QUOTA unset)"
   fi
 }
 

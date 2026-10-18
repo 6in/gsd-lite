@@ -154,9 +154,9 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 | `GSD_LITE_LIMIT_PATTERN` | 利用上限と見なすターンログの拡張正規表現（大文字小文字を区別しない） |
 | `GSD_LITE_CLAUDE_STREAM` | 既定: `on`。Claude のターンを stream-json で起動し、トークン量・コスト・権限拒否を `turns.jsonl` に記録する（イベント列は `turn-NNN-attemptN.jsonl`、最終メッセージは従来の `.log`）。`off` で従来の平文ログだけ |
 | `GSD_LITE_CLAUDE_TOKEN_VARS` | 任意。Claude のターンで使う `CLAUDE_CODE_OAUTH_TOKEN` を、列挙した環境変数名からターンごとにラウンドロビンで切り替える（下記） |
-| `GSD_LITE_MEMORY_MAX` | 任意。ループ全体（ターンの CLI・テスト・ビルドを含む）のメモリ上限（例 `8G`、`75%`）。設定すると systemd の scope の中で動く（下記） |
-| `GSD_LITE_MEMORY_SWAP_MAX` | `GSD_LITE_MEMORY_MAX` を使うときの swap 上限（既定: `0`。ループに swap を使わせない） |
-| `GSD_LITE_CPU_QUOTA` | 任意。ループ全体の CPU 上限（例 `200%` = 2 コア分）。設定すると systemd の scope の中で動く（下記） |
+| `GSD_LITE_MEMORY_MAX` | 任意。ループ全体（ターンの CLI・テスト・ビルドを含む）のメモリ上限（例 `8G`、`75%`）。state の `limits.memory_max` より優先。`off` で付けない（下記） |
+| `GSD_LITE_MEMORY_SWAP_MAX` | メモリ上限を使うときの swap 上限（既定: state の `limits.memory_swap_max`、無ければ `0`） |
+| `GSD_LITE_CPU_QUOTA` | 任意。ループ全体の CPU 上限（例 `200%` = 2 コア分）。state の `limits.cpu_quota` より優先。`off` で付けない（下記） |
 
 Codex は `approval_policy=never` で実行し、コミットのために Git 管理ディレクトリを
 `--add-dir` で渡す（linked worktree の共通 Git ディレクトリも含む）。
@@ -346,13 +346,23 @@ gsd-lite-loop.sh --status   # token 行に「次に使う変数名」が出る
 
 無人ターンのテストやビルドが暴走してメモリを使い切ると、swap の無いマシンでは全体が固まる
 （node のテストの失敗報告が 7GB まで膨らみ、OOM でサーバごと止まった実例がある）。
-`GSD_LITE_MEMORY_MAX` か `GSD_LITE_CPU_QUOTA` を設定して起動すると、ループは自分を
-`systemd-run --user --scope` の中で起動し直す。ターンの CLI・テスト・ビルドはすべてその scope の子になり、
-上限を超えても止まる・遅くなるのはループ配下だけになる。**未設定なら何も変わらない**。
+上限は **discuss の最後（実行パターンを選ぶところ）で選ぶ**。選んだ値は state.json の `limits` に保存され、
+ループは起動のたびにそれを読んで、自分を `systemd-run --user --scope` の中で起動し直す。
+ターンの CLI・テスト・ビルドはすべてその scope の子になり、上限を超えても止まる・遅くなるのは
+ループ配下だけになる。手で再開しても同じ上限が付く。**空なら何も変わらない**。
+
+```json
+"limits": { "memory_max": "8G", "cpu_quota": "200%" }
+```
+
+- `memory_max`: 超えたら scope 内のプロセスが OOM killer に止められる（マシンは固まらない）。`8G` / `512M` / `75%`
+- `cpu_quota`: `200%` で 2 コア分まで（超えた分は待たされる。止まりはしない）
+- `memory_swap_max`（任意）: 既定 `0`
+- 環境変数 `GSD_LITE_MEMORY_MAX` / `GSD_LITE_CPU_QUOTA` / `GSD_LITE_MEMORY_SWAP_MAX` は state より優先する。
+  `off` を渡すと state に書いてあっても付けない。次のマイルストーンにも引き継がれ、gsd-control 形では
+  `config.json` の `defaults.limits` が既定になる
 
 ```bash
-export GSD_LITE_MEMORY_MAX=8G      # 超えたら scope 内のプロセスが OOM killer に止められる（マシンは固まらない）
-export GSD_LITE_CPU_QUOTA=200%     # 2 コア分まで（超えた分は待たされる。止まりはしない）
 gsd-lite-loop.sh --check           # limits 行に、効く上限と効かない理由が出る
 setsid gsd-lite-loop.sh >> .gsd-lite/logs/loop.log 2>&1 &   # 起動コマンドは変わらない
 gsd-lite-loop.sh --status          # limits 行に scope 名・上限・いまのメモリ使用量
@@ -612,7 +622,7 @@ gsd-control/
 ```
 
 `config.json` の `defaults` は `state.json` と同じキー（engine / phase_engines / model / codex / opencode /
-subagents / reflect / max_turns / retry_max / verify_round_max / research）。
+subagents / reflect / limits / max_turns / retry_max / verify_round_max / research）。
 既定を変えたいときはここを編集してコミットする（進行中のマイルストーンの state には影響しない）。
 対象は複数登録でき、discuss がマイルストーンごとに 1 つ選ぶ。
 
