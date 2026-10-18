@@ -50,6 +50,21 @@
 #                              turn-NNN-attemptN.jsonl に残す。ターン後に最終メッセージを従来の
 #                              turn-NNN-attemptN.log に書き出し、トークン量などを turns.jsonl に記録する。
 #                              off なら従来どおり平文の .log だけ（トークン量は記録されない）
+#   GSD_LITE_MEMORY_MAX        任意。ループ全体（ターンの CLI・テスト・ビルドを含む）のメモリ上限（例 8G、75%）。
+#                              未設定なら state.limits.memory_max（discuss が選んで保存する）を使う。
+#                              off なら state に書いてあっても付けない
+#   GSD_LITE_CPU_QUOTA         任意。ループ全体の CPU 上限（例 200% = 2 コア分）。未設定なら state.limits.cpu_quota、
+#                              off なら付けない。メモリか CPU の上限が 1 つでも決まると、
+#                              起動時に自分を `systemd-run --user --scope` の中で起動し直す。上限を超えても
+#                              止まる・遅くなるのはループ配下だけで、マシン全体は固まらない。
+#                              systemd が使えない、またはユーザーの systemd がそのコントローラを有効にして
+#                              いない（Ubuntu の既定は memory と pids だけ）ときは警告を出し、効かない上限を
+#                              外して続行する。CPU を委譲するには
+#                              /etc/systemd/system/user@.service.d/delegate.conf に
+#                              `[Service]` と `Delegate=cpu cpuset io memory pids` を書き、OS を再起動する
+#                              （daemon-reload だけでは足りない。判定は user@<uid>.service の cgroup.subtree_control）
+#   GSD_LITE_MEMORY_SWAP_MAX   メモリ上限を使うときの swap 上限（未設定なら state.limits.memory_swap_max、それも
+#                              無ければ 0。ループに swap を使わせず、マシンの swap を他のプロセスのために残す）
 #
 # 計測: 各試行の phase / engine / model / attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 /
 # 増えたコミット数を logs/<milestone>/turns.jsonl に 1 行ずつ追記する（reflect フェーズの客観材料）。
@@ -98,6 +113,9 @@ LIMIT_PATTERN="${GSD_LITE_LIMIT_PATTERN:-hit your (session|usage) limit|usage li
 TOKENFILE="$GSD_DIR/logs/.token_index"   # トークンのラウンドロビン位置（実行時情報）
 TOKEN_VARS=()                           # check_claude_tokens が GSD_LITE_CLAUDE_TOKEN_VARS から埋める
 STOPFILE="$GSD_DIR/logs/.stop"    # 実行時情報。gitignore 済み logs/ に置く
+SCOPEFILE="$GSD_DIR/logs/.scope"  # 実行中の scope の unit 名と上限（--status 用の実行時情報）
+SYSTEMD_RUN="${GSD_LITE_SYSTEMD_RUN:-systemd-run}"   # テスト用スタブ差し込み
+USER_CGROUP="${GSD_LITE_USER_CGROUP:-/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service}"
 CLAUDE_BIN="${GSD_LITE_CLAUDE_BIN:-claude}"
 PERMISSION_MODE="${GSD_LITE_PERMISSION_MODE:-acceptEdits}"
 
@@ -548,6 +566,108 @@ trust_summary() { # --status / --check 用の 1 行
   esac
 }
 
+state_limit() { # state_limit <key> — state.json の limits.<key>（無い・空・不正な形なら空）
+  jq -r --arg key "$1" '(.limits // {})[$key] // empty | tostring' "$STATE" 2>/dev/null
+}
+
+resolve_limits() { # 上限の実効値を LIM_MEM / LIM_SWAP / LIM_CPU に決める。環境変数 → state.limits → なし
+  # 環境変数の "off" は「state に書いてあっても付けない」
+  LIM_MEM="${GSD_LITE_MEMORY_MAX:-$(state_limit memory_max)}"
+  LIM_SWAP="${GSD_LITE_MEMORY_SWAP_MAX:-$(state_limit memory_swap_max)}"
+  LIM_CPU="${GSD_LITE_CPU_QUOTA:-$(state_limit cpu_quota)}"
+  [ "$LIM_MEM" != off ] || LIM_MEM=""
+  [ "$LIM_CPU" != off ] || LIM_CPU=""
+}
+
+limits_requested() { resolve_limits; [ -n "$LIM_MEM" ] || [ -n "$LIM_CPU" ]; }
+
+check_limit_values() { # 書式が不正なら die（打ち間違いで黙って上限なしにしない）
+  local size='^[0-9]+[KMGT]?$|^[0-9]+%$'
+  resolve_limits
+  [ -z "$LIM_MEM" ] || [[ "$LIM_MEM" =~ $size ]] ||
+    die "invalid memory limit: $LIM_MEM (GSD_LITE_MEMORY_MAX or state.limits.memory_max; e.g. 8G, 512M, 75%, off)"
+  [ -z "$LIM_SWAP" ] || [[ "$LIM_SWAP" =~ $size ]] ||
+    die "invalid swap limit: $LIM_SWAP (GSD_LITE_MEMORY_SWAP_MAX or state.limits.memory_swap_max; e.g. 0, 2G)"
+  [ -z "$LIM_CPU" ] || [[ "$LIM_CPU" =~ ^[0-9]+%$ ]] ||
+    die "invalid cpu quota: $LIM_CPU (GSD_LITE_CPU_QUOTA or state.limits.cpu_quota; e.g. 200% = 2 cores, off)"
+}
+
+plan_limits() { # 効かせられる上限を LIMIT_PROPS（systemd-run の -p 引数）に、効かない理由を LIMIT_WARNS に入れる
+  LIMIT_PROPS=(); LIMIT_WARNS=()
+  local controllers
+  resolve_limits
+  if ! command -v "$SYSTEMD_RUN" >/dev/null 2>&1; then
+    LIMIT_WARNS+=("systemd-run not found — limits need systemd (WSL2 without systemd / macOS are not supported)")
+    return 1
+  fi
+  # cgroup.controllers ではなく subtree_control を見る。delegate.conf を足して daemon-reload しただけだと
+  # controllers には cpu が出るが、ユーザーの systemd が再起動するまで子に有効化されず CPUQuota は効かない
+  if ! controllers=$(cat "$USER_CGROUP/cgroup.subtree_control" 2>/dev/null); then
+    LIMIT_WARNS+=("cannot read $USER_CGROUP/cgroup.subtree_control — the user systemd (cgroup v2) is not available")
+    return 1
+  fi
+  if [ -n "$LIM_MEM" ]; then
+    case " $controllers " in
+      *" memory "*) LIMIT_PROPS+=(-p "MemoryMax=$LIM_MEM" -p "MemorySwapMax=${LIM_SWAP:-0}") ;;
+      *) LIMIT_WARNS+=("memory controller is not enabled in the user systemd — the memory limit is ignored") ;;
+    esac
+  fi
+  if [ -n "$LIM_CPU" ]; then
+    case " $controllers " in
+      *" cpu "*) LIMIT_PROPS+=(-p "CPUQuota=$LIM_CPU") ;;
+      *) LIMIT_WARNS+=("cpu controller is not enabled in the user systemd — the cpu quota is ignored (put \`Delegate=cpu cpuset io memory pids\` under [Service] in /etc/systemd/system/user@.service.d/delegate.conf and reboot; a daemon-reload alone is not enough)") ;;
+    esac
+  fi
+  [ "${#LIMIT_PROPS[@]}" -gt 0 ]
+}
+
+limit_text() { # LIMIT_PROPS を人が読む形に（例: MemoryMax=8G MemorySwapMax=0 CPUQuota=200%）
+  local item text=""
+  for item in "${LIMIT_PROPS[@]}"; do [ "$item" = -p ] || text="$text${text:+ }$item"; done
+  printf '%s\n' "$text"
+}
+
+enter_scope() { # enter_scope <args...> — 上限の指定があれば systemd の scope の中で自分を起動し直す（戻らない）
+  limits_requested || return 0
+  [ -z "${GSD_LITE_IN_SCOPE:-}" ] || return 0   # 起動し直した後の 2 回目
+  check_limit_values
+  local warn unit self
+  plan_limits
+  local planned=$?
+  for warn in "${LIMIT_WARNS[@]}"; do echo "gsd-lite: WARN $warn" >&2; done
+  if [ "$planned" -ne 0 ]; then
+    echo "gsd-lite: WARN no resource limit can be applied — running without limits" >&2
+    return 0
+  fi
+  unit="gsd-lite-$(basename "$PWD" | tr -c 'A-Za-z0-9_\n-' '-')-$$"
+  self=$(readlink -f "$0" 2>/dev/null || printf '%s\n' "$0")
+  # --scope は fork せずにその場で exec するので、PID・標準入出力（>> loop.log）はそのまま引き継がれる
+  exec env GSD_LITE_IN_SCOPE="$unit" GSD_LITE_SCOPE_LIMITS="$(limit_text)" \
+    "$SYSTEMD_RUN" --user --scope --quiet --collect --unit="$unit" "${LIMIT_PROPS[@]}" -- "$self" "$@"
+}
+
+limits_summary() { # --status / --check 用の 1 行
+  local unit text warn current=""
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null && [ -s "$SCOPEFILE" ]; then
+    unit=$(sed -n 1p "$SCOPEFILE"); text=$(sed -n 2p "$SCOPEFILE")
+    current=$(systemctl --user show "$unit" -p MemoryCurrent --value 2>/dev/null)
+    case "$current" in
+      ''|*[!0-9]*) current="" ;;
+      *) current=", memory now $(numfmt --to=iec "$current" 2>/dev/null || echo "$current")" ;;
+    esac
+    echo "limits    : scope $unit ($text$current)"
+  elif limits_requested; then
+    if plan_limits; then
+      echo "limits    : next start in a systemd scope ($(limit_text))"
+    else
+      echo "limits    : requested but cannot be applied — running without limits"
+    fi
+    for warn in "${LIMIT_WARNS[@]}"; do echo "            WARN $warn"; done
+  else
+    echo "limits    : off (state.limits empty and GSD_LITE_MEMORY_MAX / GSD_LITE_CPU_QUOTA unset)"
+  fi
+}
+
 token_summary() { # トークン切り替えの状態 1 行（値は出さない。未設定でも出して気づけるようにする）
   if [ -n "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ]; then
     # 表示だけなので値の検証はしない（検証は --check / 起動時）
@@ -586,6 +706,7 @@ status() {
   echo "subagents : $(sget '.subagents // "auto"')"
   token_summary
   trust_summary
+  limits_summary
   usage_summary
   if [ -f "$STOPFILE" ]; then
     echo "stop      : requested (cleared on next start)"
@@ -699,6 +820,8 @@ case "${1:-}" in
     check_config
     token_summary
     trust_summary
+    check_limit_values
+    limits_summary
     echo "gsd-lite: execution configuration ready"
     exit 0 ;;
   "") ;;
@@ -716,6 +839,9 @@ if ! git diff --quiet -- "$STATE" 2>/dev/null; then
   echo "gsd-lite: WARN state.json has uncommitted changes — 再開のための編集はコミットしてから起動してください（ターン失敗時に巻き戻ります）" >&2
 fi
 
+# 任意: 資源の上限があれば systemd の scope の中で起動し直す（前提の検証は scope の中でもう一度通る）
+enter_scope "$@"
+
 mkdir -p "$GSD_DIR/logs"
 
 # 二重起動ガード: flock はプロセス終了で自動解放されるため stale 問題も競合窓もない
@@ -724,8 +850,13 @@ flock -n 9 || die "loop already running (lock: $LOCKFILE)"
 # 必ず排他取得後に消す。二重起動の失敗で稼働中ループへの中断依頼を消さない。
 rm -f "$STOPFILE" || die "cannot clear $STOPFILE"
 echo $$ > "$PIDFILE"
-echo "gsd-lite: start $(date -Iseconds) pid $$ mode=$MODE${SLUG:+ slug=$SLUG}$([ "$TARGET" = . ] || echo " target=$TARGET") (append to logs/loop.log with >> so restarts keep earlier lines)"
-trap 'rm -f "$PIDFILE"' EXIT
+if [ -n "${GSD_LITE_IN_SCOPE:-}" ]; then
+  printf '%s\n%s\n' "$GSD_LITE_IN_SCOPE" "${GSD_LITE_SCOPE_LIMITS:-}" > "$SCOPEFILE"
+else
+  rm -f "$SCOPEFILE"
+fi
+echo "gsd-lite: start $(date -Iseconds) pid $$ mode=$MODE${SLUG:+ slug=$SLUG}$([ "$TARGET" = . ] || echo " target=$TARGET")${GSD_LITE_IN_SCOPE:+ scope=$GSD_LITE_IN_SCOPE (${GSD_LITE_SCOPE_LIMITS:-})} (append to logs/loop.log with >> so restarts keep earlier lines)"
+trap 'rm -f "$PIDFILE" "$SCOPEFILE"' EXIT
 trap 'finish 130' INT TERM
 
 while true; do

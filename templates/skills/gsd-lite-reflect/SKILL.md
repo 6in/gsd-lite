@@ -55,7 +55,7 @@ slug=<slug>
 ## 読む記録（この順で。全部読んでから書く）
 
 1. `$MS/state.json`: milestone / branch / turn / verify_round / fix_round /
-   engine / phase_engines / model・codex・opencode / subagents
+   engine / phase_engines / model・codex・opencode / subagents / limits
 2. `.gsd-lite/logs/<milestone>/turns.jsonl`: ループが 1 試行ごとに記録した客観データ
    （phase / engine / model / attempt / 所要秒 / rc / progressed / commits。gsd-control 形では
    対象側に増えたコード側のコミット数 `target_commits` も）。エンジンが報告したターンには
