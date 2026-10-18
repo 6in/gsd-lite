@@ -244,7 +244,10 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
    - **起動する**: `setsid gsd-lite-loop.sh >> .gsd-lite/logs/loop.log 2>&1 &` で（`>>` で追記。`>` だと
      再起動のたびに前回のループログが消える）
      デタッチ起動し、`gsd-lite-loop.sh --status` などの監視コマンドを提示して
-     **即座に手を離す**。以後このセッションでログをポーリングしない
+     **即座に手を離す**。以後このセッションでログをポーリングしない。
+     環境変数 `GSD_LITE_MEMORY_MAX` / `GSD_LITE_CPU_QUOTA` があればループ自身が systemd の scope に
+     入り直すので起動コマンドは同じ（`--status` の `limits` 行で確認できる）。ユーザーがマシンの
+     メモリ枯渇を心配しているときは、これらを付けて起動するか確認する
    - **見守る**: バックグラウンドのサブエージェントを 1 体起動する。指示は
      「$MS/state.json の phase の変化と loop.pid の消滅を Bash の
      until ループで待ち、変化のたびに 1 行（例: `research → plan (turn 3)`）、

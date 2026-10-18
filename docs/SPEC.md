@@ -648,6 +648,9 @@ discuss セッション自身がデタッチ起動してくれる**（コピペ�
 setsid gsd-lite-loop.sh >> .gsd-lite/logs/loop.log 2>&1 &
 ```
 
+メモリや CPU に上限を付けるなら `GSD_LITE_MEMORY_MAX=8G` / `GSD_LITE_CPU_QUOTA=200%` を設定して同じように起動する
+（ループが自分を `systemd-run --user --scope` の中で起動し直す。README の「ループのメモリと CPU に上限を付ける」）。
+
 → research → plan → impl ×N → verify → 自動マージ → DONE が無人で進む。
 実行中はこのリポジトリを触らない（同一ツリー運用）。
 
