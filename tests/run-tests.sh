@@ -1210,5 +1210,37 @@ assert_eq "template state has empty limits" "$(jq -c .limits "$REPO_DIR/template
 assert_eq "template config defaults have empty limits" "$(jq -c .defaults.limits "$REPO_DIR/templates/config.json")" '{"memory_max":"","cpu_quota":""}'
 unset STUB_RUN_LOG
 
+echo "== Test 44: トークン切り替え中に利用上限に当たったら、待たずに次のトークンでやり直す =="
+cat > "$TESTROOT/bin/claude-limit-token" <<'EOF'
+#!/usr/bin/env bash
+echo "${CLAUDE_CODE_OAUTH_TOKEN:-<unset>}" >> .gsd-lite/token-seen.log
+case " ${LIMITED_TOKENS:-} " in
+  *" ${CLAUDE_CODE_OAUTH_TOKEN:-} "*) echo "You've hit your session limit · resets 3am"; exit 1 ;;
+esac
+exec "$(dirname "$0")/claude-happy" "$@"
+EOF
+chmod +x "$TESTROOT/bin/claude-limit-token"
+make_project "$TESTROOT/t44"
+commit_state '.retry_max=0'
+LIMITED_TOKENS="secret-aaa" TOK_A=secret-aaa TOK_B=secret-bbb GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B" \
+  GSD_LITE_LIMIT_WAIT=0 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-limit-token" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "one limited token: cycle DONE" "$?" "0"
+grep -q 'usage limit hit (wait' "$TESTROOT/loop-out.log" && ng "waited although another token was free" || ok "no wait while another token is free"
+grep -q 'usage limit hit on TOK_A — switching to the next token' "$TESTROOT/loop-out.log" && ok "switch names the limited variable" || ng "switch message"
+grep -q 'secret-' "$TESTROOT/loop-out.log" && ng "token value leaked on switch" || ok "switch does not print token values"
+assert_eq "limit counter untouched by switches" "$(cat .gsd-lite/logs/.limit_retry 2>/dev/null || echo 0)" "0"
+assert_eq "retry untouched by switches" "$(cat .gsd-lite/logs/.retry 2>/dev/null || echo 0)" "0"
+assert_eq "every progressing turn used TOK_B" "$(jq -r 'select(.rc == 0) | .token_var' .gsd-lite/logs/toy/turns.jsonl | sort -u)" "TOK_B"
+make_project "$TESTROOT/t44b"
+LIMITED_TOKENS="secret-aaa secret-bbb" TOK_A=secret-aaa TOK_B=secret-bbb GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B" \
+  GSD_LITE_LIMIT_WAIT=0 GSD_LITE_LIMIT_MAX=2 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-limit-token" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "all tokens limited -> BLOCKED" "$?" "2"
+assert_eq "waits only after every token hit the limit" "$(grep -c 'usage limit hit (wait' "$TESTROOT/loop-out.log")" "2"
+assert_eq "switches once per round before waiting" "$(grep -c 'switching to the next token' "$TESTROOT/loop-out.log")" "3"
+assert_eq "tokens tried in order across waits" "$(paste -sd, .gsd-lite/token-seen.log)" "secret-aaa,secret-bbb,secret-aaa,secret-bbb,secret-aaa,secret-bbb"
+make_project "$TESTROOT/t44c"
+GSD_LITE_LIMIT_WAIT=0 GSD_LITE_LIMIT_MAX=1 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-limit-always" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+grep -q 'switching to the next token' "$TESTROOT/loop-out.log" && ng "switched without token rotation" || ok "without rotation the limit still waits"
+
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
