@@ -149,7 +149,7 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 | `GSD_LITE_CODEX_SANDBOX` | 既定: `workspace-write`。bubblewrap が使えない環境では `danger-full-access`（sandbox なし。隔離環境向け） |
 | `GSD_LITE_CODEX_SANDBOX_PROBE` | 既定: `auto`。Codex を使うフェーズがあれば起動前に `codex sandbox -- true` で sandbox の実効性を検証する。`skip` で省略 |
 | `GSD_LITE_TURN_TIMEOUT` | 1 ターンの制限秒数（既定: 3600、両エンジン共通） |
-| `GSD_LITE_LIMIT_WAIT` | 利用上限（session / usage / rate limit）で無進捗に終わったターンを再試行するまでの待機秒数（既定: 900）。このとき retry は増やさない |
+| `GSD_LITE_LIMIT_WAIT` | 利用上限（session / usage / rate limit）で無進捗に終わったターンを再試行するまでの待機秒数（既定: 900）。このとき retry は増やさない。`GSD_LITE_CLAUDE_TOKEN_VARS` で複数トークンを回しているときは、全トークンが続けて上限に当たったときだけ待つ |
 | `GSD_LITE_LIMIT_MAX` | 利用上限による連続待機の上限回数（既定: 8）。超えたら auto-BLOCKED |
 | `GSD_LITE_LIMIT_PATTERN` | 利用上限と見なすターンログの拡張正規表現（大文字小文字を区別しない） |
 | `GSD_LITE_CLAUDE_STREAM` | 既定: `on`。Claude のターンを stream-json で起動し、トークン量・コスト・権限拒否を `turns.jsonl` に記録する（イベント列は `turn-NNN-attemptN.jsonl`、最終メッセージは従来の `.log`）。`off` で従来の平文ログだけ |
@@ -334,6 +334,9 @@ gsd-lite-loop.sh --status   # token 行に「次に使う変数名」が出る
 
 - 順番は A → B → C → A … で、リトライも 1 回と数えて次に進む。位置は `.gsd-lite/logs/.token_index`
   に保存され（gitignore 済み）、ループを再開しても続きから回る
+- 利用上限（session / usage / rate limit）に当たったターンは、`GSD_LITE_LIMIT_WAIT` 秒待たずに
+  **すぐ次のトークンでやり直す**（上限はトークン（組織）ごとなので、他に空きがあれば待つ必要がない）。
+  全トークンが続けて上限に当たったときだけ待機し、その待機回数を `GSD_LITE_LIMIT_MAX` と比べる
 - 値はログにも画面にも出さず、`turn N [claude/impl] ... (token: CLAUDE_TOKEN_ORG_B)` のように
   変数名だけを表示する。`--status` / `--watch` の `token` 行で次に使う変数が分かる
 - `--check` と通常起動は、Claude を使うフェーズがある場合に列挙された変数がすべて非空であることを

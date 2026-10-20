@@ -36,6 +36,8 @@
 #                              （`claude setup-token` で取得した組織ごとのトークンを順番に使う用途）。
 #                              未設定なら従来通り親環境の CLAUDE_CODE_OAUTH_TOKEN をそのまま使う。
 #                              値はログ・出力に出さず、変数名だけを表示する。次に使う位置は logs/.token_index
+#                              利用上限に当たったターンは待たずに次のトークンでやり直し、全トークンが
+#                              続けて当たったときだけ GSD_LITE_LIMIT_WAIT 秒待つ
 #   GSD_LITE_WATCH_INTERVAL    --watch の再描画間隔秒（デフォルト 3）
 #   GSD_LITE_WATCH_LOG_LINES   --watch で表示するログ末尾の行数（デフォルト 15。+/- キーで増減）
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
@@ -859,6 +861,7 @@ echo "gsd-lite: start $(date -Iseconds) pid $$ mode=$MODE${SLUG:+ slug=$SLUG}$([
 trap 'rm -f "$PIDFILE" "$SCOPEFILE"' EXIT
 trap 'finish 130' INT TERM
 
+limit_skips=0   # 利用上限に当たって待たずに次のトークンへ回した連続回数（全トークンが当たったら待つ）
 while true; do
   cmd=$(sget '.next_command')
   case "$cmd" in
@@ -986,6 +989,15 @@ while true; do
     # 利用上限で落ちたターンは詰まりではないので retry を増やさず、待ってから同じターンをやり直す
     if grep -Eqi -- "$LIMIT_PATTERN" "$log" 2>/dev/null ||
        [ "$(echo "$usage_json" | jq -r '.rate_limit.status // empty')" = rejected ]; then
+      # トークンを切り替えているなら、上限に当たったのはそのトークンだけかもしれない。
+      # まだ当たっていないトークンが残っていれば待たずに次のトークンでやり直す
+      if [ -n "$token_var" ] && [ "$limit_skips" -lt $(( ${#TOKEN_VARS[@]} - 1 )) ]; then
+        limit_skips=$((limit_skips + 1))
+        echo "gsd-lite: usage limit hit on $token_var — switching to the next token without waiting (retry stays $retry) — see $log" >&2
+        sleep 1
+        continue
+      fi
+      limit_skips=0
       limit_retry=$(( $(get_limit_retry) + 1 ))
       limit_max="${GSD_LITE_LIMIT_MAX:-8}"
       if [ "$limit_retry" -gt "$limit_max" ]; then
@@ -998,6 +1010,7 @@ while true; do
       sleep "${GSD_LITE_LIMIT_WAIT:-900}"
       continue
     fi
+    limit_skips=0
     set_limit_retry 0
     retry=$((retry + 1))
     retry_max=$(sget '.retry_max')
@@ -1012,6 +1025,7 @@ while true; do
     continue
   fi
   set_retry 0
+  limit_skips=0
   set_limit_retry 0
   check_updated_at
   if [ "$rc" -ne 0 ]; then

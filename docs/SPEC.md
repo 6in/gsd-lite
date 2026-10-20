@@ -500,7 +500,9 @@ done
   各ターンを包む。ハングしたターンは kill され「進捗なし」としてリトライ経路に乗る
 - **利用上限はリトライに数えない**: 無進捗のターンのログが利用上限の文言
   （`GSD_LITE_LIMIT_PATTERN`）に当たれば、`retry` を増やさず `GSD_LITE_LIMIT_WAIT` 秒待って
-  同じターンをやり直す。連続 `GSD_LITE_LIMIT_MAX` 回で auto-BLOCKED（本当の詰まりと区別するため）
+  同じターンをやり直す。連続 `GSD_LITE_LIMIT_MAX` 回で auto-BLOCKED（本当の詰まりと区別するため）。
+  `GSD_LITE_CLAUDE_TOKEN_VARS` でトークンを切り替えているときは、上限はトークンごとなので待たずに次の
+  トークンでやり直し、全トークンが続けて上限に当たったときだけ待つ（待機回数の数え方は同じ）
 - **使用量の記録**: Claude のターンは `--output-format stream-json --verbose` で起動し、最後の `result`
   イベントから `usage` / `total_cost_usd` / `num_turns` / `permission_denials` を、`rate_limit_event` から
   利用枠の使用率を取り出して `turns.jsonl` に足す（Codex はログ末尾の `tokens used` の合計のみ）。
