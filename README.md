@@ -88,6 +88,7 @@ gsd-control 形の注意（詳細は下の[制御リポジトリ方式](#制御�
 gsd-lite-loop.sh --status   # 1 回表示
 gsd-lite-loop.sh --watch    # 簡易 TUI: 状態・PLAN のタスク・実行中ターンのログを数秒ごとに再描画
 gsd-lite-loop.sh --where    # 作業場所（mode / milestone_dir / state / target / slug）を key=value で表示
+gsd-lite-loop.sh --tokens   # トークンごとの利用枠（5 時間 / 7 日の使用率とリセットまで）。どのディレクトリからでも可
 ```
 
 `--where` はスキルが最初に 1 回呼び、以降のコマンドではその値をリテラルのパスとして使う
@@ -153,7 +154,9 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 | `GSD_LITE_LIMIT_MAX` | 利用上限による連続待機の上限回数（既定: 8）。超えたら auto-BLOCKED |
 | `GSD_LITE_LIMIT_PATTERN` | 利用上限と見なすターンログの拡張正規表現（大文字小文字を区別しない） |
 | `GSD_LITE_CLAUDE_STREAM` | 既定: `on`。Claude のターンを stream-json で起動し、トークン量・コスト・権限拒否を `turns.jsonl` に記録する（イベント列は `turn-NNN-attemptN.jsonl`、最終メッセージは従来の `.log`）。`off` で従来の平文ログだけ |
-| `GSD_LITE_CLAUDE_TOKEN_VARS` | 任意。Claude のターンで使う `CLAUDE_CODE_OAUTH_TOKEN` を、列挙した環境変数名からターンごとにラウンドロビンで切り替える（下記） |
+| `GSD_LITE_CLAUDE_TOKEN_VARS` | 任意。Claude のターンで使う `CLAUDE_CODE_OAUTH_TOKEN` を、列挙した環境変数名からターンごとに切り替える（下記） |
+| `GSD_LITE_TOKEN_PICK` | `usage`（既定）/ `round-robin`。`usage` は利用枠の使用率が最も低いトークンを選ぶ（同率なら順番どおり）。`round-robin` は使用率を見ずに順番どおり |
+| `GSD_LITE_TOKEN_LIMITS` | トークンごとの利用枠を記録する共有ファイル（既定: `${XDG_STATE_HOME:-~/.local/state}/gsd-lite/token-limits.json`） |
 | `GSD_LITE_MEMORY_MAX` | 任意。ループ全体（ターンの CLI・テスト・ビルドを含む）のメモリ上限（例 `8G`、`75%`）。state の `limits.memory_max` より優先。`off` で付けない（下記） |
 | `GSD_LITE_MEMORY_SWAP_MAX` | メモリ上限を使うときの swap 上限（既定: state の `limits.memory_swap_max`、無ければ `0`） |
 | `GSD_LITE_CPU_QUOTA` | 任意。ループ全体の CPU 上限（例 `200%` = 2 コア分）。state の `limits.cpu_quota` より優先。`off` で付けない（下記） |
@@ -328,17 +331,38 @@ export CLAUDE_TOKEN_ORG_C='sk-ant-oat01-...'   # 同、組織 C
 # 3. 変数名を列挙して起動（値ではなく名前を渡す）
 export GSD_LITE_CLAUDE_TOKEN_VARS="CLAUDE_TOKEN_ORG_A CLAUDE_TOKEN_ORG_B CLAUDE_TOKEN_ORG_C"
 gsd-lite-loop.sh --check    # 3 変数がすべて非空か確認
-gsd-lite-loop.sh            # ターンごとに A → B → C → A … と切り替えて実行
+gsd-lite-loop.sh            # ターンごとに、利用枠の使用率が最も低いトークンを選んで実行
 gsd-lite-loop.sh --status   # token 行に「次に使う変数名」が出る
+gsd-lite-loop.sh --tokens   # 各トークンの残り（5 時間 / 7 日の使用率とリセットまで）を表示
 ```
 
-- 順番は A → B → C → A … で、リトライも 1 回と数えて次に進む。位置は `.gsd-lite/logs/.token_index`
-  に保存され（gitignore 済み）、ループを再開しても続きから回る
+- 既定（`GSD_LITE_TOKEN_PICK=usage`）では、ターンごとに**利用枠の使用率が最も低いトークン**を選ぶ。
+  使用率は 5 時間枠と 7 日枠の大きい方で、リセット時刻を過ぎた枠は 0 とみなす。まだ記録の無いトークンも 0。
+  同率なら A → B → C → A … の順番で回す（どれも記録が無い最初のうちは従来どおりの順番になる）。
+  順番の位置は `.gsd-lite/logs/.token_index` に保存され（gitignore 済み）、ループを再開しても続きから回る。
+  `GSD_LITE_TOKEN_PICK=round-robin` なら使用率を見ずに順番どおり
+- 使用率は、Claude のターンが報告する利用枠（stream-json の `rate_limit_event`）を、ターンのたびに
+  **マシン共通の共有ファイル**（既定 `~/.local/state/gsd-lite/token-limits.json`、`GSD_LITE_TOKEN_LIMITS`
+  で変更可）へ変数名をキーに書き込んだもの。同じマシンで複数のプロジェクトのループを動かしていれば、
+  互いの消費を見て選ぶ。キーは変数名なので、**同じトークンはどのプロジェクトでも同じ変数名にする**
+  （値は書かない）。`GSD_LITE_CLAUDE_STREAM=off` だと利用枠が取れないので記録されない
+- 値はその変数のトークンで最後にターンを回した時点のもの。ループの外（対話セッション等）での使用は、
+  次にそのトークンでターンを回すまで反映されない
 - 利用上限（session / usage / rate limit）に当たったターンは、`GSD_LITE_LIMIT_WAIT` 秒待たずに
   **すぐ次のトークンでやり直す**（上限はトークン（組織）ごとなので、他に空きがあれば待つ必要がない）。
   全トークンが続けて上限に当たったときだけ待機し、その待機回数を `GSD_LITE_LIMIT_MAX` と比べる
 - 値はログにも画面にも出さず、`turn N [claude/impl] ... (token: CLAUDE_TOKEN_ORG_B)` のように
   変数名だけを表示する。`--status` / `--watch` の `token` 行で次に使う変数が分かる
+- `gsd-lite-loop.sh --tokens` は共有ファイルを表にして出す（どのディレクトリからでも実行でき、トークンは
+  消費しない）。`GSD_LITE_CLAUDE_TOKEN_VARS` が設定されていればその順で、記録の無い変数も出す
+
+  ```
+  VAR                   LOAD  5H    RESET   7D    RESET   STATUS          UPDATED   LAST USED IN
+  CLAUDE_TOKEN_ORG_A    66%   10%   0h59m   66%   4d15h   allowed         4m ago    /path/to/proj (m1)
+  CLAUDE_TOKEN_ORG_B    2%    0%    reset   2%    5d18h   allowed         3h ago    /path/to/other
+  ```
+
+  `LOAD` は選択に使う値（5H と 7D の大きい方）。生の値は `jq . ~/.local/state/gsd-lite/token-limits.json`
 - `--check` と通常起動は、Claude を使うフェーズがある場合に列挙された変数がすべて非空であることを
   確認し、欠けていれば終了コード 6 で止める（途中で空トークンに当たって無進捗になるのを防ぐ）
 - Codex / OpenCode のターンには影響しない。全フェーズが Codex / OpenCode なら無視される

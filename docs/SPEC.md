@@ -503,6 +503,11 @@ done
   同じターンをやり直す。連続 `GSD_LITE_LIMIT_MAX` 回で auto-BLOCKED（本当の詰まりと区別するため）。
   `GSD_LITE_CLAUDE_TOKEN_VARS` でトークンを切り替えているときは、上限はトークンごとなので待たずに次の
   トークンでやり直し、全トークンが続けて上限に当たったときだけ待つ（待機回数の数え方は同じ）
+- **トークンの選択**（`GSD_LITE_CLAUDE_TOKEN_VARS` 設定時）: Claude のターンが報告した利用枠を、マシン共通の
+  共有ファイル（`GSD_LITE_TOKEN_LIMITS`）に変数名をキーに書く（flock で排他、一時ファイル＋mv で置き換え）。
+  次のターンは使用率（5 時間枠と 7 日枠の大きい方。リセット済みの枠は 0、記録なしも 0）が最も低い変数を選び、
+  同率なら順番どおり。rejected で使用率が来なかった枠は 1 とみなす。`GSD_LITE_TOKEN_PICK=round-robin` で従来の
+  順番どおり。`--tokens` で共有ファイルを表示する（進捗判定には使わない）
 - **使用量の記録**: Claude のターンは `--output-format stream-json --verbose` で起動し、最後の `result`
   イベントから `usage` / `total_cost_usd` / `num_turns` / `permission_denials` を、`rate_limit_event` から
   利用枠の使用率を取り出して `turns.jsonl` に足す（Codex はログ末尾の `tokens used` の合計のみ）。

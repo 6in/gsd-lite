@@ -6,7 +6,9 @@ trap 'rm -rf "$TESTROOT"' EXIT
 LOOP=$(cd "$(dirname "$0")/.." && pwd)/bin/gsd-lite-loop.sh
 REPO_DIR=$(dirname "$(dirname "$LOOP")")
 # 呼び出し元のエンジン設定をテストに持ち込まない。
-unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL GSD_LITE_CLAUDE_TOKEN_VARS CLAUDE_CODE_OAUTH_TOKEN GSD_LITE_MEMORY_MAX GSD_LITE_MEMORY_SWAP_MAX GSD_LITE_CPU_QUOTA GSD_LITE_IN_SCOPE GSD_LITE_SCOPE_LIMITS
+unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL GSD_LITE_CLAUDE_TOKEN_VARS CLAUDE_CODE_OAUTH_TOKEN GSD_LITE_MEMORY_MAX GSD_LITE_MEMORY_SWAP_MAX GSD_LITE_CPU_QUOTA GSD_LITE_IN_SCOPE GSD_LITE_SCOPE_LIMITS GSD_LITE_TOKEN_PICK
+# トークンの利用枠の共有ファイルは利用者のもの（~/.local/state）を触らない
+export GSD_LITE_TOKEN_LIMITS="$TESTROOT/token-limits.json"
 # スタブは `codex sandbox` を実装しないので、sandbox probe は専用テスト以外で飛ばす。
 export GSD_LITE_CODEX_SANDBOX_PROBE=skip
 # テスト用ディレクトリは Claude Code の trust を受けていないので、trust 検証は専用テスト以外で飛ばす。
@@ -1241,6 +1243,56 @@ assert_eq "tokens tried in order across waits" "$(paste -sd, .gsd-lite/token-see
 make_project "$TESTROOT/t44c"
 GSD_LITE_LIMIT_WAIT=0 GSD_LITE_LIMIT_MAX=1 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-limit-always" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
 grep -q 'switching to the next token' "$TESTROOT/loop-out.log" && ng "switched without token rotation" || ok "without rotation the limit still waits"
+
+echo "== Test 45: 使用率の低いトークンを選び（GSD_LITE_TOKEN_PICK）、利用枠を共有ファイルに書いて --tokens で見る =="
+# トークンごとに決まった 7 日枠の使用率を返すスタブ
+cat > "$TESTROOT/bin/claude-usage-token" <<'EOF'
+#!/usr/bin/env bash
+echo "${CLAUDE_CODE_OAUTH_TOKEN:-<unset>}" >> .gsd-lite/token-seen.log
+case "${CLAUDE_CODE_OAUTH_TOKEN:-}" in
+  secret-aaa) u=0.7 ;; secret-bbb) u=0.1 ;; *) u=0.3 ;;
+esac
+now=$(date +%s)
+echo "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"rateLimitType\":\"five_hour\",\"resetsAt\":$((now + 3600)),\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.05,\"resetsAt\":$((now + 3600))},\"seven_day\":{\"utilization\":$u,\"resetsAt\":$((now + 86400))}}}}"
+exec "$(dirname "$0")/claude-happy" "$@"
+EOF
+chmod +x "$TESTROOT/bin/claude-usage-token"
+export GSD_LITE_TOKEN_LIMITS="$TESTROOT/t45-limits.json"
+make_project "$TESTROOT/t45"
+TOK_A=secret-aaa TOK_B=secret-bbb TOK_C=secret-ccc GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B TOK_C" \
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-usage-token" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "usage pick: cycle DONE" "$?" "0"
+assert_eq "unknown tokens first in order, then the least used" "$(jq -r .token_var .gsd-lite/logs/toy/turns.jsonl | paste -sd,)" "TOK_A,TOK_B,TOK_C,TOK_B,TOK_B,TOK_B"
+assert_eq "turns.jsonl keeps per-window reset times" "$(jq -r 'select(.turn==1) | (.rate_limit.five_hour_resets_at != null and .rate_limit.seven_day_resets_at != null)' .gsd-lite/logs/toy/turns.jsonl)" "true"
+assert_eq "shared file has one row per variable" "$(jq -r 'keys | join(",")' "$GSD_LITE_TOKEN_LIMITS")" "TOK_A,TOK_B,TOK_C"
+assert_eq "shared file keeps both windows" "$(jq -r '.TOK_A | "\(.five_hour.utilization) \(.seven_day.utilization) \(.seven_day.resets_at > now)"' "$GSD_LITE_TOKEN_LIMITS")" "0.05 0.7 true"
+assert_eq "shared file names the project" "$(jq -r .TOK_B.project "$GSD_LITE_TOKEN_LIMITS")" "$(pwd)"
+grep -q 'secret-' "$GSD_LITE_TOKEN_LIMITS" && ng "token value leaked to the shared file" || ok "shared file has no token values"
+out=$(TOK_A=x TOK_B=y TOK_C=z GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B TOK_C" "$LOOP" --status)
+echo "$out" | grep -q 'token     : rotating 3 vars (next: TOK_B) — pick: usage' && ok "status shows the least used token as next" || ng "status next by usage"
+out=$(cd "$TESTROOT" && GSD_LITE_CLAUDE_TOKEN_VARS="TOK_C TOK_A TOK_B TOK_D" "$LOOP" --tokens)
+assert_eq "--tokens works outside a project" "$?" "0"
+assert_eq "--tokens lists variables in the configured order" "$(echo "$out" | awk 'NR > 2 && /^TOK_/ {print $1}' | paste -sd,)" "TOK_C,TOK_A,TOK_B,TOK_D"
+echo "$out" | grep -Eq '^TOK_A +70% +5% +[0-9]+h[0-9]+m +70% ' && ok "--tokens shows load and both windows" || ng "--tokens row ($out)"
+echo "$out" | grep -q '^TOK_D .*(no record yet)' && ok "--tokens flags variables without records" || ng "--tokens missing row"
+make_project "$TESTROOT/t45b"
+rm -f "$GSD_LITE_TOKEN_LIMITS"
+GSD_LITE_TOKEN_PICK=round-robin TOK_A=secret-aaa TOK_B=secret-bbb TOK_C=secret-ccc GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B TOK_C" \
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-usage-token" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "round-robin ignores usage" "$(jq -r .token_var .gsd-lite/logs/toy/turns.jsonl | paste -sd,)" "TOK_A,TOK_B,TOK_C,TOK_A,TOK_B,TOK_C"
+# リセット時刻を過ぎた枠は 0、rejected で使用率の来なかった枠は 1 とみなす
+now=$(date +%s)
+echo "{\"TOK_A\":{\"five_hour\":{\"utilization\":0.9,\"resets_at\":$((now - 60))}},\"TOK_B\":{\"seven_day\":{\"utilization\":0.2,\"resets_at\":$((now + 600))}}}" > "$GSD_LITE_TOKEN_LIMITS"
+out=$(GSD_LITE_CLAUDE_TOKEN_VARS="TOK_B TOK_A" "$LOOP" --status)
+echo "$out" | grep -q '(next: TOK_A)' && ok "expired window counts as 0" || ng "expired window ($out)"
+make_project "$TESTROOT/t45c"
+rm -f "$GSD_LITE_TOKEN_LIMITS"
+GSD_LITE_LIMIT_WAIT=0 GSD_LITE_LIMIT_MAX=1 TOK_A=secret-aaa GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A" \
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-stream-rejected" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "rejected without utilization is recorded as full" "$(jq -r '.TOK_A | "\(.status) \(.five_hour.utilization) \(.five_hour.resets_at > now)"' "$GSD_LITE_TOKEN_LIMITS")" "rejected 1 true"
+GSD_LITE_TOKEN_PICK=bogus TOK_A=x GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "invalid GSD_LITE_TOKEN_PICK fails --check" "$?" "6"
+export GSD_LITE_TOKEN_LIMITS="$TESTROOT/token-limits.json"
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
