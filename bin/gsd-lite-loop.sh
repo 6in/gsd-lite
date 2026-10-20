@@ -10,6 +10,7 @@
 #   gsd-lite-loop.sh --stop     # 現在のターン終了後に中断を依頼
 #   gsd-lite-loop.sh --watch    # 進捗・タスク・実行中ログを数秒ごとに再描画する簡易 TUI（q で終了）
 #   gsd-lite-loop.sh --watch-once # --watch の 1 画面ぶんを出力して終了（非対話・テスト用）
+#   gsd-lite-loop.sh --tokens   # トークンごとの利用枠（5 時間 / 7 日の使用率とリセットまでの時間）を表示（どこからでも可）
 #   gsd-lite-loop.sh --where    # 作業場所の解決結果（mode / milestone_dir / state / target / slug）を key=value で表示。
 #                               # スキルが最初に 1 回呼び、以降はその値をリテラルで使う（Bash ツールはコール間で変数を保持しない）
 #
@@ -38,6 +39,13 @@
 #                              値はログ・出力に出さず、変数名だけを表示する。次に使う位置は logs/.token_index
 #                              利用上限に当たったターンは待たずに次のトークンでやり直し、全トークンが
 #                              続けて当たったときだけ GSD_LITE_LIMIT_WAIT 秒待つ
+#   GSD_LITE_TOKEN_PICK        usage / round-robin（デフォルト usage）。usage なら利用枠の使用率
+#                              （5 時間と 7 日の大きい方。リセット済みの枠は 0）が最も低いトークンを選び、
+#                              同率なら従来の順番で回す。round-robin なら使用率を見ずに順番どおり
+#   GSD_LITE_TOKEN_LIMITS      トークンごとの利用枠を記録する共有ファイル（デフォルト
+#                              ${XDG_STATE_HOME:-~/.local/state}/gsd-lite/token-limits.json）。このマシンの
+#                              全プロジェクトのループが Claude のターンのたびに変数名をキーに書き込み、選択と
+#                              --tokens の表示に使う。値（トークン）は書かない。同じ変数名は同じトークンとみなす
 #   GSD_LITE_WATCH_INTERVAL    --watch の再描画間隔秒（デフォルト 3）
 #   GSD_LITE_WATCH_LOG_LINES   --watch で表示するログ末尾の行数（デフォルト 15。+/- キーで増減）
 #   GSD_LITE_TURN_TIMEOUT      1 ターンの制限秒数（デフォルト 3600。超過はハング扱いで
@@ -114,6 +122,9 @@ LIMITFILE="$GSD_DIR/logs/.limit_retry"   # 利用上限による連続待機の�
 LIMIT_PATTERN="${GSD_LITE_LIMIT_PATTERN:-hit your (session|usage) limit|usage limit reached|rate limit}"
 TOKENFILE="$GSD_DIR/logs/.token_index"   # トークンのラウンドロビン位置（実行時情報）
 TOKEN_VARS=()                           # check_claude_tokens が GSD_LITE_CLAUDE_TOKEN_VARS から埋める
+TOKEN_LIMITS="${GSD_LITE_TOKEN_LIMITS:-${XDG_STATE_HOME:-$HOME/.local/state}/gsd-lite/token-limits.json}"
+TOKEN_PICK="${GSD_LITE_TOKEN_PICK:-usage}"   # usage | round-robin
+LIMITED_TOKEN_VARS=""                   # 今回の上限の連続で当たった変数名（空白区切り。選択から外す）
 STOPFILE="$GSD_DIR/logs/.stop"    # 実行時情報。gitignore 済み logs/ に置く
 SCOPEFILE="$GSD_DIR/logs/.scope"  # 実行中の scope の unit 名と上限（--status 用の実行時情報）
 SYSTEMD_RUN="${GSD_LITE_SYSTEMD_RUN:-systemd-run}"   # テスト用スタブ差し込み
@@ -252,7 +263,9 @@ turn_usage() { # このターンでエンジンが報告した使用量を JSON 
             permission_denial_inputs: [$e.permission_denials[]? | (.tool_input // {} | tostring | .[0:160])]}
           elif $e.type == "rate_limit_event" then . + {rate_limit: ($e.rate_limit_info
             | {status, type: .rateLimitType, resets_at: .resetsAt,
-               five_hour: .unifiedWindows.five_hour.utilization, seven_day: .unifiedWindows.seven_day.utilization})}
+               five_hour: .unifiedWindows.five_hour.utilization, seven_day: .unifiedWindows.seven_day.utilization,
+               five_hour_resets_at: .unifiedWindows.five_hour.resetsAt,
+               seven_day_resets_at: .unifiedWindows.seven_day.resetsAt})}
           else . end)' "$rawlog" 2>/dev/null || echo '{}' ;;
     codex)
       # codex exec は平文ログの末尾に「tokens used」と合計値（桁区切りあり）を出す。内訳は無い
@@ -459,6 +472,10 @@ check_claude_tokens() {
   [ "$uses_claude" -eq 1 ] || return 0
   read -r -a TOKEN_VARS <<< "$GSD_LITE_CLAUDE_TOKEN_VARS"
   [ "${#TOKEN_VARS[@]}" -gt 0 ] || die "GSD_LITE_CLAUDE_TOKEN_VARS is set but lists no variable names"
+  case "$TOKEN_PICK" in
+    usage|round-robin) ;;
+    *) die "invalid GSD_LITE_TOKEN_PICK: $TOKEN_PICK (usage or round-robin)" ;;
+  esac
   for name in "${TOKEN_VARS[@]}"; do
     case "$name" in
       [A-Za-z_]*) ;;
@@ -478,11 +495,102 @@ token_index() { # 次に使うトークン変数の添字（0 始まり）
   echo $((idx % ${#TOKEN_VARS[@]}))
 }
 
-next_token_var() { # ラウンドロビンで変数名を返し、位置を進める
+# 共有ファイルの記録から、変数ごとに今の使用率（5 時間と 7 日の大きい方。リセット時刻を過ぎた枠は 0）を出す。
+# 記録が無い・壊れている変数は 0（まだ使っていない＝空いている扱い）
+TOKEN_LOAD_JQ='def win($w): if ($w.resets_at // 0) > now then ($w.utilization // 0) else 0 end;
+  def load($r): [win($r.five_hour // {}), win($r.seven_day // {})] | max;'
+
+pick_token_index() { # 次に使う変数の添字。usage なら使用率最小、同率は token_index から順に見て先のもの
+  local start db
+  start=$(token_index)
+  if [ "$TOKEN_PICK" = round-robin ]; then
+    # 今回の上限の連続で当たった変数だけは飛ばす
+    jq -n --argjson start "$start" --arg limited " $LIMITED_TOKEN_VARS " '$ARGS.positional as $v | ($v | length) as $n
+      | [range($n) | ($start + .) % $n | . as $i | select(($limited | index(" " + $v[$i] + " ")) == null)] | (.[0] // $start)' \
+      --args "${TOKEN_VARS[@]}"
+    return
+  fi
+  db=$(jq -c 'if type == "object" then . else {} end' "$TOKEN_LIMITS" 2>/dev/null) || db='{}'
+  [ -n "$db" ] || db='{}'
+  jq -n --argjson start "$start" --argjson db "$db" --arg limited " $LIMITED_TOKEN_VARS " "$TOKEN_LOAD_JQ"'
+    $ARGS.positional as $v | ($v | length) as $n
+    | [range($n) | ($start + .) % $n | . as $i | select(($limited | index(" " + $v[$i] + " ")) == null)
+       | {i: $i, load: load($db[$v[$i]] // {})}]
+    | reduce .[] as $c (null; if . == null or $c.load < .load then $c else . end) | (.i // $start)' \
+    --args "${TOKEN_VARS[@]}"
+}
+
+next_token_var() { # 使う変数名を返し、順番の位置をその次へ進める
   local idx
-  idx=$(token_index)
+  idx=$(pick_token_index)
   echo $(( (idx + 1) % ${#TOKEN_VARS[@]} )) > "$TOKENFILE"
   printf '%s\n' "${TOKEN_VARS[$idx]}"
+}
+
+save_token_limits() { # このターンの利用枠を共有ファイルの token_var の行に書く（rate_limit が無ければ何もしない）
+  local dir rl
+  [ -n "$token_var" ] || return 0
+  rl=$(echo "$usage_json" | jq -c '.rate_limit // empty' 2>/dev/null)
+  [ -n "$rl" ] || return 0
+  dir=$(dirname "$TOKEN_LIMITS")
+  mkdir -p "$dir" 2>/dev/null || { echo "gsd-lite: WARN cannot create $dir — token limits not shared" >&2; return 0; }
+  (
+    flock -w 10 8 || exit 0
+    db=$(jq -c 'if type == "object" then . else {} end' "$TOKEN_LIMITS" 2>/dev/null) || db='{}'
+    [ -n "$db" ] || db='{}'
+    tmp=$(mktemp "$TOKEN_LIMITS.XXXXXX") || exit 0
+    # rejected で使用率が来なかった枠は使い切った（1）とみなす。リセット時刻が無ければ枠の長さだけ先にする
+    if jq -n --argjson db "$db" --argjson rl "$rl" --arg var "$token_var" --arg project "$(pwd)" \
+        --arg milestone "$(sget '.milestone // empty')" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      def win($name; $len): ($db[$var][$name] // {}) as $old
+        | (if $rl.status == "rejected" and $rl.type == $name then 1 else null end) as $full
+        | ($rl[$name] // $full) as $u
+        | if $u == null then $old
+          else {utilization: ([$u, ($full // 0)] | max),
+                resets_at: ($rl[$name + "_resets_at"] // (if $rl.type == $name then $rl.resets_at else null end)
+                            // (now + $len | floor))} end;
+      $db + {($var): {updated_at: $at, status: $rl.status, project: $project, milestone: $milestone,
+                      five_hour: win("five_hour"; 18000), seven_day: win("seven_day"; 604800)}}' > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$TOKEN_LIMITS"
+    else
+      rm -f "$tmp"
+    fi
+  ) 8>"$TOKEN_LIMITS.lock"
+}
+
+tokens_report() { # --tokens: 共有ファイルの利用枠を変数ごとに表示する（値は持たないので、どこからでも見られる）
+  local listed=() db
+  [ -z "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ] || read -r -a listed <<< "$GSD_LITE_CLAUDE_TOKEN_VARS"
+  echo "== gsd-lite tokens ($TOKEN_LIMITS) =="
+  if [ ! -s "$TOKEN_LIMITS" ] && [ "${#listed[@]}" -eq 0 ]; then
+    echo "no records yet (written after each Claude turn that rotates GSD_LITE_CLAUDE_TOKEN_VARS)"
+    return 0
+  fi
+  db=$(jq -c 'if type == "object" then . else {} end' "$TOKEN_LIMITS" 2>/dev/null) || db='{}'
+  [ -n "$db" ] || db='{}'
+  # GSD_LITE_CLAUDE_TOKEN_VARS に並べた変数を先に、その順で出す。残りは名前順
+  jq -nr --argjson db "$db" "$TOKEN_LOAD_JQ"'
+    def pct($w): if ($w.resets_at // 0) > now then "\(($w.utilization // 0) * 100 | round)%" else "0%" end;
+    def left($t): if $t == null then "-" else ($t - now | floor) as $s
+      | if $s <= 0 then "reset" elif $s >= 86400 then "\($s / 86400 | floor)d\($s % 86400 / 3600 | floor)h"
+        else "\($s / 3600 | floor)h\($s % 3600 / 60 | floor)m" end end;
+    def ago($at): ($at | try fromdateiso8601 catch null) as $t
+      | if $t == null then "-" else (now - $t | floor) as $s
+        | if $s < 3600 then "\($s / 60 | floor)m ago" elif $s < 86400 then "\($s / 3600 | floor)h ago"
+          else "\($s / 86400 | floor)d ago" end end;
+    def pad($n): tostring | . + (" " * ([$n - length, 0] | max));
+    ($ARGS.positional + (($db | keys) - $ARGS.positional)) as $vars
+    | ("VAR" | pad(22)) + ("LOAD" | pad(6)) + ("5H" | pad(6)) + ("RESET" | pad(8)) + ("7D" | pad(6)) + ("RESET" | pad(8))
+      + ("STATUS" | pad(16)) + ("UPDATED" | pad(10)) + "LAST USED IN",
+      ($vars[] as $v | $db[$v] as $r
+       | if $r == null then ($v | pad(22)) + "(no record yet)"
+         else ($v | pad(22)) + ("\(load($r) * 100 | round)%" | pad(6))
+           + (pct($r.five_hour // {}) | pad(6)) + (left($r.five_hour.resets_at) | pad(8))
+           + (pct($r.seven_day // {}) | pad(6)) + (left($r.seven_day.resets_at) | pad(8))
+           + ($r.status // "-" | pad(16)) + (ago($r.updated_at) | pad(10))
+           + "\($r.project // "-")\(if ($r.milestone // "") != "" then " (\($r.milestone))" else "" end)" end)' \
+    --args "${listed[@]}"
+  echo "(LOAD = max(5h, 7d); a window past its reset counts as 0%. Values are as of each token's last Claude turn.)"
 }
 
 check_git_identity() {
@@ -675,7 +783,7 @@ token_summary() { # トークン切り替えの状態 1 行（値は出さない
     # 表示だけなので値の検証はしない（検証は --check / 起動時）
     read -r -a TOKEN_VARS <<< "$GSD_LITE_CLAUDE_TOKEN_VARS"
     if [ "${#TOKEN_VARS[@]}" -gt 0 ]; then
-      echo "token     : rotating ${#TOKEN_VARS[@]} vars (next: ${TOKEN_VARS[$(token_index)]})"
+      echo "token     : rotating ${#TOKEN_VARS[@]} vars (next: ${TOKEN_VARS[$(pick_token_index)]}) — pick: $TOKEN_PICK (see --tokens)"
       return
     fi
   fi
@@ -814,6 +922,7 @@ case "${1:-}" in
     exit 0 ;;
   --status) status; exit 0 ;;
   --where) command -v jq >/dev/null || die "jq is required"; where; exit 0 ;;
+  --tokens) command -v jq >/dev/null || die "jq is required"; tokens_report; exit 0 ;;
   --watch) command -v jq >/dev/null || die "jq is required"; watch; exit 0 ;;
   --watch-once) command -v jq >/dev/null || die "jq is required"; require_state; watch_render; exit 0 ;;
   --check)
@@ -827,7 +936,7 @@ case "${1:-}" in
     echo "gsd-lite: execution configuration ready"
     exit 0 ;;
   "") ;;
-  *) die "unknown option: $1 (supported: --status, --watch, --watch-once, --where, --check, --stop)" ;;
+  *) die "unknown option: $1 (supported: --status, --watch, --watch-once, --where, --tokens, --check, --stop)" ;;
 esac
 
 command -v jq >/dev/null || die "jq is required"
@@ -980,6 +1089,7 @@ while true; do
   turn_after=$(committed_state '.turn')
   [ -n "$turn_after" ] || die "cannot read committed state (HEAD:$STATE)"
   record_turn
+  save_token_limits
   report_usage
   # ターン境界の正規化: 作業ツリーの state を HEAD に揃える（未コミットの書きかけを残さない）
   git checkout HEAD -- "$STATE" || die "failed to restore $STATE from HEAD"
@@ -993,11 +1103,12 @@ while true; do
       # まだ当たっていないトークンが残っていれば待たずに次のトークンでやり直す
       if [ -n "$token_var" ] && [ "$limit_skips" -lt $(( ${#TOKEN_VARS[@]} - 1 )) ]; then
         limit_skips=$((limit_skips + 1))
+        LIMITED_TOKEN_VARS="$LIMITED_TOKEN_VARS $token_var"
         echo "gsd-lite: usage limit hit on $token_var — switching to the next token without waiting (retry stays $retry) — see $log" >&2
         sleep 1
         continue
       fi
-      limit_skips=0
+      limit_skips=0; LIMITED_TOKEN_VARS=""
       limit_retry=$(( $(get_limit_retry) + 1 ))
       limit_max="${GSD_LITE_LIMIT_MAX:-8}"
       if [ "$limit_retry" -gt "$limit_max" ]; then
@@ -1010,7 +1121,7 @@ while true; do
       sleep "${GSD_LITE_LIMIT_WAIT:-900}"
       continue
     fi
-    limit_skips=0
+    limit_skips=0; LIMITED_TOKEN_VARS=""
     set_limit_retry 0
     retry=$((retry + 1))
     retry_max=$(sget '.retry_max')
@@ -1025,7 +1136,7 @@ while true; do
     continue
   fi
   set_retry 0
-  limit_skips=0
+  limit_skips=0; LIMITED_TOKEN_VARS=""
   set_limit_retry 0
   check_updated_at
   if [ "$rc" -ne 0 ]; then
