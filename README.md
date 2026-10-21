@@ -13,6 +13,8 @@ research → plan → impl → verify → 仕上げ（ローカルのみなら�
 
 設計の全容と利用手順: [docs/SPEC.md](docs/SPEC.md)（§11 がユーザー視点のウォークスルー）
 
+紹介資料（初めて使う人向けのスライド）: [docs/gsd-lite-intro.pptx](docs/gsd-lite-intro.pptx)
+
 変更履歴: [CHANGELOG.md](CHANGELOG.md)
 
 ## インストール
