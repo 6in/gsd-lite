@@ -97,6 +97,10 @@ gsd-lite-loop.sh --where    # 作業場所（mode / milestone_dir / state / targ
 gsd-lite-loop.sh --tokens   # トークンごとの利用枠（5 時間 / 7 日の使用率とリセットまで）。どのディレクトリからでも可
 ```
 
+`--status` の `verify` 行は差し戻し回数（`verify_round`）/ 上限と、次の verify が何ラウンド目かを出す
+（例: `差し戻し 1/3（次の verify は round 2）`）。Codex を使うフェーズがあれば `sandbox` 行、
+BLOCKED の通知先は `notify` 行に出る。
+
 `--where` はスキルが最初に 1 回呼び、以降のコマンドではその値をリテラルのパスとして使う
 （Claude Code の Bash ツールはコール間でシェル変数を保持しないため、`MS=...` と変数に入れてから使う
 書き方は失敗する）。人間が state と成果物の場所を確かめるときにも使える。
@@ -106,8 +110,8 @@ gsd-lite-loop.sh --tokens   # トークンごとの利用枠（5 時間 / 7 日�
 ログ行数は `GSD_LITE_WATCH_LOG_LINES`（既定 15）。`--watch-once` は 1 画面ぶんを出力して終了する。
 
 終了コード: 0=DONE（ローカル: マージ済み / リモート: MR 作成済み）/ 2=BLOCKED（`.gsd-lite/BLOCKED.md` 参照）/
-3=max_turns / 4=discuss 未完了 / 7=一時中断。通知が欲しければ `.gsd-lite/hooks/on-exit.sh` と
-`on-phase.sh` に書く。
+3=max_turns / 4=discuss 未完了 / 6=前提エラー / 7=一時中断。通知が欲しければ `.gsd-lite/hooks/on-exit.sh` と
+`on-phase.sh` に書く。BLOCKED（人の対応待ち）だけを知らせるなら `on-blocked.sh`（下の[BLOCKED の通知](#blocked-の通知任意)）。
 
 ## Codex で使う
 
@@ -139,7 +143,8 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
   "engine": "codex",
   "codex": {
     "model": { "research": "gpt-5.5", "plan": "gpt-5.5", "impl": "gpt-5.5", "verify": "gpt-5.5" },
-    "reasoning_effort": { "plan": "high", "verify": "high" }
+    "reasoning_effort": { "plan": "high", "verify": "high" },
+    "sandbox": "danger-full-access"
   }
 }
 ```
@@ -148,12 +153,18 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 未指定のフェーズは Codex CLI の設定を使う。モデルと推論強度は利用環境で
 対応する値を指定する。既存の `model` は Claude 専用で、Codex には渡さない。
 
+`codex.sandbox` は Codex の全フェーズに渡す sandbox（`read-only` / `workspace-write` / `danger-full-access`。
+空なら `workspace-write`）。discuss が選んで保存し、次のマイルストーンにも引き継がれる。verify が Docker や
+外部 API を使うプロジェクトでは `workspace-write` だとテストが動かずに BLOCKED になるので、隔離された開発環境なら
+`danger-full-access` にしておく。`GSD_LITE_CODEX_SANDBOX` を付けて起動すると state より優先される（食い違えば WARN）。
+実効値は `--status` / `--check` の `sandbox` 行と、loop.log の開始行（`codex_sandbox=...`）で確かめられる。
+
 | 環境変数 | 用途 |
 |---|---|
 | `GSD_LITE_ENGINE` | 全フェーズを `claude` / `codex` / `opencode` に上書き（phase_engines より優先） |
 | `GSD_LITE_CODEX_BIN` | Codex 実行ファイル（既定: `codex`） |
 | `GSD_LITE_CODEX_MODEL` | Codex の全フェーズ共通モデル（state より優先） |
-| `GSD_LITE_CODEX_SANDBOX` | 既定: `workspace-write`。bubblewrap が使えない環境では `danger-full-access`（sandbox なし。隔離環境向け） |
+| `GSD_LITE_CODEX_SANDBOX` | 任意。state の `codex.sandbox` より優先（どちらも無ければ `workspace-write`）。通常は state に保存して付けずに起動する |
 | `GSD_LITE_CODEX_SANDBOX_PROBE` | 既定: `auto`。Codex を使うフェーズがあれば起動前に `codex sandbox -- true` で sandbox の実効性を検証する。`skip` で省略 |
 | `GSD_LITE_TURN_TIMEOUT` | 1 ターンの制限秒数（既定: 3600、両エンジン共通） |
 | `GSD_LITE_LIMIT_WAIT` | 利用上限（session / usage / rate limit）で無進捗に終わったターンを再試行するまでの待機秒数（既定: 900）。このとき retry は増やさない。`GSD_LITE_CLAUDE_TOKEN_VARS` で複数トークンを回しているときは、全トークンが続けて上限に当たったときだけ待つ |
@@ -166,6 +177,10 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 | `GSD_LITE_MEMORY_MAX` | 任意。ループ全体（ターンの CLI・テスト・ビルドを含む）のメモリ上限（例 `8G`、`75%`）。state の `limits.memory_max` より優先。`off` で付けない（下記） |
 | `GSD_LITE_MEMORY_SWAP_MAX` | メモリ上限を使うときの swap 上限（既定: state の `limits.memory_swap_max`、無ければ `0`） |
 | `GSD_LITE_CPU_QUOTA` | 任意。ループ全体の CPU 上限（例 `200%` = 2 コア分）。state の `limits.cpu_quota` より優先。`off` で付けない（下記） |
+| `GSD_LITE_ON_BLOCKED` | 任意。BLOCKED で止まったときに呼ぶ実行ファイルのパス（マシン共通の通知スクリプト用。`.gsd-lite/hooks/on-blocked.sh` があればそれも呼ぶ。下記） |
+| `GSD_LITE_PERMISSION_MODE` | Claude のターンの `--permission-mode`（既定: `acceptEdits`） |
+| `GSD_LITE_CLAUDE_TRUST_CHECK` | 既定: `auto`。Claude を使うフェーズがあれば、このディレクトリが Claude Code で trust 済みか起動前に確かめる。`skip` で省略 |
+| `GSD_LITE_INSTRUCTIONS_CHECK` | 既定: `auto`。指示ファイル（AGENTS.md / CLAUDE.md）の組が、使うエンジンに読まれる形か起動前に確かめて警告する。`skip` で省略 |
 
 Codex は `approval_policy=never` で実行し、コミットのために Git 管理ディレクトリを
 `--add-dir` で渡す（linked worktree の共通 Git ディレクトリも含む）。
@@ -197,7 +212,7 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/9
 
 この設定は一般ユーザーの user namespace 作成を許可するもので、bwrap 以外にも
 システム全体に効く。設定できない・したくない場合は、隔離された環境に限って
-`GSD_LITE_CODEX_SANDBOX=danger-full-access`（sandbox なし）で起動するか、
+state の `codex.sandbox` を `danger-full-access`（sandbox なし）にするか、
 Codex を使うフェーズを Claude に切り替える。
 
 既存の Claude プロジェクトでは、Codex から `$gsd-lite-init` でスキルを追加・更新し、
@@ -469,12 +484,22 @@ verify 合格でマージまたは MR/PR 作成が済んだ後、**reflect フ�
   | `num_turns` / `duration_api_ms` | ターン内の往復回数 / API 時間 | ○ | — | — |
   | `permission_denials` | 承認待ちで拒否されたツール名（無人ターンが詰まる原因） | ○ | — | — |
   | `rate_limit` | 利用枠の状態と使用率（`five_hour` / `seven_day`） | ○ | — | — |
+  | `segments` | そのターンの `result` の数（バックグラウンド実行の完了通知で再開した回数 + 1） | ○ | — | — |
+
+  バックグラウンド実行（`run_in_background`）の完了通知で再開したターンは、`claude -p` が区間ごとに
+  `result` を出す。`usage` / `num_turns` / `permission_denials` は区間ごとの値なので全区間を合計・連結し、
+  `cost_usd` / `duration_api_ms` は累積値なので最後の値を記録する（2026-10-23 より前の記録は `segments` が無く、
+  `usage` などが最後の区間だけのことがある）。
 
   Claude のターンは `--output-format stream-json --verbose` で起動し、イベント列を
   `turn-NNN-attemptN.jsonl` に残す。ターン後に最終メッセージを従来どおり `turn-NNN-attemptN.log` に
   書き出すので、平文ログを読む処理（利用上限の判定・reflect）は変わらない。`--watch` は実行中の
   イベント列をツール呼び出しと本文の行に整形して表示する。ループは各ターンの後に
   `turn N usage input=… output=… cache_read=… cost=$…` を出し、権限拒否があれば WARN を出す。
+  権限拒否（承認待ち）が 1 件以上あった進んだターンは、`PROGRESS.md` の末尾に
+  `- 承認待ち（ループ計測・turn N）: K 件 — Bash: ps, WebFetch` の形で件数と要約（ツール名 ＋ Bash ならコマンドの
+  先頭 1 語。引数やパスは書かない）を追記して `gsd-lite(loop):` でコミットする（エージェントが PROGRESS を
+  書きかけで残していたら見送る）。reflect はこの件数を正とする。
   `--status` の `usage` 行はマイルストーンの合計。`GSD_LITE_CLAUDE_STREAM=off` で従来の平文だけに戻せる
   （使用量は記録されない）。例: フェーズ別の集計
 
@@ -525,6 +550,9 @@ discuss の最後に、実行パターンを選んでからループを開始す
 
 カスタム指定（フェーズごとに `claude` / `codex` / `opencode` を選ぶ）や、現在の設定を維持する選択も可能。
 選択結果は `state.json` に保存して要件と一緒にコミットする。
+Codex を使うフェーズがあれば、discuss は sandbox（`codex.sandbox`）も選ばせる。前回のマイルストーンの DECISIONS に
+環境変数付きの起動コマンドがあれば、state に移せるもの（sandbox・資源の上限）は移し、残りを今回も付けるか確認する
+（環境変数は次のマイルストーンに引き継がれないため。付け忘れて verify が Docker を使えずに BLOCKED になった実例がある）。
 モデルはそのフェーズを実行するエンジンの設定を使う。
 
 レビューだけ Codex の保存例（state の一部）:
@@ -575,8 +603,12 @@ gsd-lite-loop.sh --status   # フェーズ別の実行先・モデルと進捗�
   以外なら `codex sandbox -c sandbox_mode=... -- true` を実行する。bubblewrap が
   unprivileged user namespace を作れない環境（Ubuntu 24.04 の
   `kernel.apparmor_restrict_unprivileged_userns=1` など）では Codex のシェル実行も
-  `apply_patch` も全て失敗するため、ここで止めて対処（`GSD_LITE_CODEX_SANDBOX=danger-full-access`、
-  カーネル設定の変更、または impl / verify を Claude に切り替え）を案内する
+  `apply_patch` も全て失敗するため、ここで止めて対処（state の `codex.sandbox` を `danger-full-access` に、
+  カーネル設定の変更、または impl / verify を Claude に切り替え）を案内する。実効値と出どころ
+  （`GSD_LITE_CODEX_SANDBOX` / `state.codex.sandbox` / `default`）は `sandbox` 行に出る
+- **BLOCKED の通知先**（表示のみ）: `notify` 行に、BLOCKED で止まったときに呼ばれるもの
+  （`hooks/on-blocked.sh` / `GSD_LITE_ON_BLOCKED` / `hooks/on-exit.sh`）を出す。どれも無ければ `none` と出る。
+  `GSD_LITE_ON_BLOCKED` が実行できないパスなら WARN（下の[BLOCKED の通知](#blocked-の通知任意)）
 ループ自体は対話せず、保存された組み合わせで毎ターン実行先を切り替える。
 既存プロジェクトは再インストール後、init でスキルを更新すると選択手順が反映される。
 
@@ -602,6 +634,34 @@ gsd-lite は次の組を推奨し、方針の全体を [docs/agent-instructions.
 - **振り返り → AGENTS.md**: reflect は「次回への提案」のうち繰り返し効く作業上の決まりに `（AGENTS.md 候補）` と付け、
   次の discuss がそれを採否確認して AGENTS.md に足す（採否は DECISIONS.md。gsd-control 形では対象側の
   マイルストーンブランチにコミットし、MR で base に入る）
+
+## BLOCKED の通知（任意）
+
+ループが BLOCKED で止まっても、そのままでは誰にも知らされない。夜間に回すと、人が気づくまで止まったままになる
+（achat の 10 時間のマイルストーンでは、壁時計の 73% が BLOCKED に気づくまでの待ちだった）。止まったときに
+自分のスクリプトを呼ばせて、ntfy / Slack / メール等で知らせる。送信の中身は利用者が書く。
+
+```bash
+# プロジェクトごと: サンプルをコピーして送信先の行を有効にする（.gsd-lite/hooks/ はリポジトリに入る）
+cp ~/.claude/gsd-lite/templates/hooks/on-blocked.sh .gsd-lite/hooks/on-blocked.sh
+chmod +x .gsd-lite/hooks/on-blocked.sh
+
+# マシン共通: Webhook URL などをリポジトリに置きたくなければ、リポジトリの外に置いてパスを渡す
+GSD_LITE_ON_BLOCKED=~/.config/gsd-lite/on-blocked.sh setsid gsd-lite-loop.sh >> .gsd-lite/logs/loop.log 2>&1 &
+
+gsd-lite-loop.sh --check    # notify 行に、BLOCKED で呼ばれるものが出る（無ければ none）
+```
+
+- 引数: `$1` = BLOCKED.md のパス、`$2` = 理由の 1 行（BLOCKED.md の見出しと空行を除いた最初の行）、
+  `$3` = 終了コード。カレントディレクトリはループを起動したディレクトリ。両方あれば両方呼ぶ（フック → 環境変数の順）
+- 呼ばれるとき: このループのターンで BLOCKED になったとき（ループ自身の auto-BLOCKED と、エージェントが書いた
+  BLOCKED のどちらも。終了コード 2）と、ループ開始後の前提エラー（対象のブランチ違い等。終了コード 6。
+  `$1` は空、`$2` はエラーの 1 行目）。起動時からすでに BLOCKED だった（再起動しただけの）ときと、
+  起動前の前提エラー（その場で見えている）では呼ばない
+- `on-exit.sh` も従来どおり on-blocked の後に呼ばれる。ループ開始後の前提エラーでも `on-exit.sh 6 <phase>` が呼ばれる
+- フックの失敗はループの終了コードに影響しない。サンプル（`templates/hooks/on-blocked.sh`）は送信先を選ぶまで
+  loop.log に 1 行出すだけ
+- discuss は `--check` の `notify` 行が `none` なら、フックを置くか、通知なしで確認頻度を決めるかを聞く
 
 ## 中断と再開
 

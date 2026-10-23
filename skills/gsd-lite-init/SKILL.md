@@ -132,7 +132,7 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
    ネットワークや追加パスなど必要な権限は起動前に環境側で用意する。
    sandbox は bubblewrap の unprivileged user namespace に依存する。使えない環境
    （`codex sandbox -- true` が失敗する）では `--check` が止めるので、
-   `GSD_LITE_CODEX_SANDBOX=danger-full-access`（隔離環境向け）かカーネル設定で対処する。
+   state の `codex.sandbox` を `danger-full-access`（隔離環境向け。discuss で選ぶ）にするかカーネル設定で対処する。
    無人ターンは MCP の承認プロンプトに応答できないため、Codex 側で承認必須の
    MCP ツールは使えない点にも注意する。
    **OpenCode でもこの手順をスキップ**。ループは `opencode run --dangerously-skip-permissions`

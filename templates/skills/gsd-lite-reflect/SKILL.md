@@ -63,6 +63,9 @@ slug=<slug>
    Codex は `total_tokens` だけ）/ `cost_usd` / `num_turns` / `permission_denials`（承認待ちで拒否された
    ツール名）/ `permission_denial_heads`（ツール名 ＋ Bash ならコマンドの先頭 1 語）/ `permission_denial_inputs`（入力の先頭）/
    `rate_limit`（利用枠の使用率）も入る。無い行は「記録なし」として扱い、推定で埋めない。
+   バックグラウンド実行の完了通知で再開したターンは、ループが全区間を合計して記録し、`segments` に区間数を残す
+   （`segments` が無い行は 2026-10-23 より前の記録で、`usage` / `num_turns` / `permission_denials` が最後の区間だけの
+   ことがある。`cost_usd` は当時から全区間の累積）。`segments` が無い行の過小な値を「作業量が少ない」根拠にしない
    **承認待ちの件数は turns.jsonl の `permission_denials` を正とする**。ループは 1 件以上あった進んだターンについて
    PROGRESS の末尾に `- 承認待ち（ループ計測・turn N）: K 件 — …` を追記してコミットする（`gsd-lite(loop):`）。
    エージェントの自己申告と食い違うのは、サブエージェントの分や失敗した試行の分が自己申告に入らないためで、指摘の対象にしない

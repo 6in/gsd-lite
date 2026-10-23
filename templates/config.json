@@ -4,7 +4,7 @@
   "defaults": {
     "engine": "claude",
     "phase_engines": {},
-    "codex": { "model": {}, "reasoning_effort": {} },
+    "codex": { "model": {}, "reasoning_effort": {}, "sandbox": "" },
     "opencode": { "model": {}, "variant": {}, "agent": {} },
     "subagents": "auto",
     "reflect": true,
