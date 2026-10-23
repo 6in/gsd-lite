@@ -18,7 +18,8 @@
 #   GSD_LITE_ENGINE            claude / codex / opencode（未指定時 state.engine、旧 state は claude）
 #   GSD_LITE_CODEX_BIN         codex バイナリの上書き
 #   GSD_LITE_CODEX_MODEL       Codex の全フェーズ共通モデル（state.codex.model より優先）
-#   GSD_LITE_CODEX_SANDBOX     Codex sandbox（デフォルト workspace-write）
+#   GSD_LITE_CODEX_SANDBOX     Codex sandbox（未指定時 state.codex.sandbox、それも無ければ workspace-write）。
+#                              discuss が選んで state に保存するので、通常は付けずに起動する
 #   GSD_LITE_CODEX_SANDBOX_PROBE auto / skip（デフォルト auto）。Codex を使うフェーズがあり
 #                              sandbox が danger-full-access 以外なら、起動前に
 #                              `codex sandbox -- true` で sandbox が実際に動くか検証する
@@ -79,6 +80,10 @@
 #   GSD_LITE_MEMORY_SWAP_MAX   メモリ上限を使うときの swap 上限（未設定なら state.limits.memory_swap_max、それも
 #                              無ければ 0。ループに swap を使わせず、マシンの swap を他のプロセスのために残す）
 #
+#   GSD_LITE_ON_BLOCKED        任意。BLOCKED で止まったときに呼ぶ実行ファイルのパス（マシン共通の通知スクリプト用）。
+#                              .gsd-lite/hooks/on-blocked.sh があればそれも呼ぶ。引数は <BLOCKED.md のパス> <理由の 1 行>
+#                              <終了コード>。ループ開始後に前提エラーで止まったとき（終了コード 6）も、パスを空にして呼ぶ
+#
 # 計測: 各試行の phase / engine / model / attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 /
 # 増えたコミット数を logs/<milestone>/turns.jsonl に 1 行ずつ追記する（reflect フェーズの客観材料）。
 # エンジンが報告した場合は usage（トークン量）/ cost_usd / num_turns / permission_denials（承認待ちで
@@ -135,7 +140,14 @@ USER_CGROUP="${GSD_LITE_USER_CGROUP:-/sys/fs/cgroup/user.slice/user-$(id -u).sli
 CLAUDE_BIN="${GSD_LITE_CLAUDE_BIN:-claude}"
 PERMISSION_MODE="${GSD_LITE_PERMISSION_MODE:-acceptEdits}"
 
-die() { echo "gsd-lite-loop: $*" >&2; exit 6; }
+LOOP_STARTED=0                     # 排他を取ってループを始めたら 1（以降の die は finish を通す）
+TURN_RAN=0                         # このプロセスで 1 ターン以上実行したら 1（起動時から BLOCKED なら通知しない）
+
+die() {
+  echo "gsd-lite-loop: $*" >&2
+  [ "$LOOP_STARTED" = 1 ] || exit 6
+  finish 6 "$*"   # ループ開始後の前提エラー（ブランチ違い等）も人の対応待ちなので、フックを通して知らせる
+}
 
 resolve_state() { # MODE / MS_DIR / STATE / SLUG / TARGET を決める（state が無くても die しない。有無は呼び手が見る）
   MODE=repo; MS_DIR="$GSD_DIR"; STATE="$MS_DIR/state.json"; SLUG=""; TARGET=.
@@ -250,20 +262,24 @@ turn_usage() { # このターンでエンジンが報告した使用量を JSON 
   case "$ENGINE" in
     claude)
       [ "$rawlog" != "$log" ] || { echo '{}'; return 0; }
-      jq -Rnc 'reduce (inputs | fromjson? | select(type == "object")) as $e ({};
-          if $e.type == "result" then . + {
-            usage: {input_tokens: $e.usage.input_tokens, output_tokens: $e.usage.output_tokens,
-                    cache_read_input_tokens: $e.usage.cache_read_input_tokens,
-                    cache_creation_input_tokens: $e.usage.cache_creation_input_tokens},
-            cost_usd: $e.total_cost_usd, num_turns: $e.num_turns, duration_api_ms: $e.duration_api_ms,
-            is_error: $e.is_error, permission_denials: [$e.permission_denials[]?.tool_name],
+      # バックグラウンド実行の完了通知で再開したターンは result が区間ごとに複数出る。usage / num_turns /
+      # permission_denials は区間ごとの値なので合計・連結し、total_cost_usd / duration_api_ms は累積値なので
+      # 最後の値を使う。is_error は最後の区間（ターンの最終結果）。segments は result の数
+      jq -Rnc 'def plus($a; $b): if $a == null then $b elif $b == null then $a else $a + $b end;
+        reduce (inputs | fromjson? | select(type == "object")) as $e ({};
+          if $e.type == "result" then . as $acc | . + {
+            usage: (["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+              | map({key: ., value: plus($acc.usage[.]; $e.usage[.])}) | from_entries),
+            cost_usd: $e.total_cost_usd, num_turns: plus($acc.num_turns; $e.num_turns),
+            duration_api_ms: $e.duration_api_ms, is_error: $e.is_error, segments: (($acc.segments // 0) + 1),
+            permission_denials: (($acc.permission_denials // []) + [$e.permission_denials[]?.tool_name]),
             # 拒否された呼び出しの要約。heads は PROGRESS に書く短い形（ツール名 ＋ Bash ならコマンドの先頭 1 語。
             # 引数やパスは書かない）。inputs は turns.jsonl（git 管理外）だけに残す入力の先頭
-            permission_denial_heads: [$e.permission_denials[]? | .tool_name + (
+            permission_denial_heads: (($acc.permission_denial_heads // []) + [$e.permission_denials[]? | .tool_name + (
               if .tool_name == "Bash" then (.tool_input.command // "" | tostring | sub("^\\s+"; "")
                 | split(" ")[0] | split("/") | last | gsub("[^A-Za-z0-9._+-]"; "") | if . == "" then "" else ": " + . end)
-              else "" end)],
-            permission_denial_inputs: [$e.permission_denials[]? | (.tool_input // {} | tostring | .[0:160])]}
+              else "" end)]),
+            permission_denial_inputs: (($acc.permission_denial_inputs // []) + [$e.permission_denials[]? | (.tool_input // {} | tostring | .[0:160])])}
           elif $e.type == "rate_limit_event" then . + {rate_limit: ($e.rate_limit_info
             | {status, type: .rateLimitType, resets_at: .resetsAt,
                five_hour: .unifiedWindows.five_hour.utilization, seven_day: .unifiedWindows.seven_day.utilization,
@@ -347,10 +363,56 @@ usage_summary() { # --status 用: このマイルストーンの turns.jsonl に
     end' "$f" 2>/dev/null || true
 }
 
-finish() { # finish <exit_code> — on-exit フックを呼んで終了
+blocked_reason() { # BLOCKED.md の理由の 1 行（見出しと空行を飛ばした最初の行。200 文字まで）
+  local line
+  line=$(grep -v -e '^[[:space:]]*$' -e '^#' "$MS_DIR/BLOCKED.md" 2>/dev/null | head -n 1)
+  printf '%s\n' "${line:0:200}"
+}
+
+notify_blocked() { # notify_blocked <BLOCKED.md のパス（無ければ空）> <理由の 1 行> <終了コード> — 失敗は無視
+  # 通知の中身（メール・Slack 等）は利用者のスクリプトに任せる。GSD_LITE_ON_BLOCKED はリポジトリに
+  # 置きたくない宛先（Webhook URL 等）を持つマシン共通のスクリプト用
+  run_hook on-blocked.sh "$@"
+  [ -n "${GSD_LITE_ON_BLOCKED:-}" ] || return 0
+  if [ -x "$GSD_LITE_ON_BLOCKED" ] && [ ! -d "$GSD_LITE_ON_BLOCKED" ]; then
+    "$GSD_LITE_ON_BLOCKED" "$@" 9>&- || true
+  else
+    echo "gsd-lite: WARN GSD_LITE_ON_BLOCKED is not an executable file: $GSD_LITE_ON_BLOCKED" >&2
+  fi
+}
+
+notify_summary() { # --status / --check 用の 1 行: BLOCKED で止まったことを誰が知らせるか
+  local via=""
+  [ -x "$GSD_DIR/hooks/on-blocked.sh" ] && via="hooks/on-blocked.sh"
+  if [ -n "${GSD_LITE_ON_BLOCKED:-}" ]; then
+    if [ -x "$GSD_LITE_ON_BLOCKED" ] && [ ! -d "$GSD_LITE_ON_BLOCKED" ]; then
+      via="$via${via:+, }GSD_LITE_ON_BLOCKED=$GSD_LITE_ON_BLOCKED"
+    else
+      via="$via${via:+, }GSD_LITE_ON_BLOCKED=$GSD_LITE_ON_BLOCKED (NOT executable — ignored)"
+    fi
+  fi
+  [ -x "$GSD_DIR/hooks/on-exit.sh" ] && via="$via${via:+, }hooks/on-exit.sh (exit code 2)"
+  if [ -n "$via" ]; then
+    echo "notify    : $via"
+  else
+    echo "notify    : none — nobody is told when the loop stops at BLOCKED (add .gsd-lite/hooks/on-blocked.sh or set GSD_LITE_ON_BLOCKED; sample: templates/hooks/on-blocked.sh in gsd-lite)"
+  fi
+}
+
+finish() { # finish <exit_code> [<理由>] — 人の対応待ちなら on-blocked を、続けて on-exit フックを呼んで終了
   local code=$1 phase
   phase=$(sget '.phase' 2>/dev/null || echo unknown)
   rm -f "$PIDFILE"
+  case "$code" in
+    2) if [ "$TURN_RAN" = 1 ]; then   # このプロセスのターンで BLOCKED になった（起動時から BLOCKED なら知らせない）
+         if [ -f "$MS_DIR/BLOCKED.md" ]; then
+           notify_blocked "$MS_DIR/BLOCKED.md" "$(blocked_reason)" 2
+         else
+           notify_blocked "" "(no $MS_DIR/BLOCKED.md)" 2
+         fi
+       fi ;;
+    6) notify_blocked "" "$(printf '%s\n' "${2:-}" | head -n 1)" 6 ;;
+  esac
   run_hook on-exit.sh "$code" "$phase"
   exit "$code"
 }
@@ -371,6 +433,33 @@ select_engine() {
     opencode) AGENT_BIN="${GSD_LITE_OPENCODE_BIN:-opencode}" ;;
     *) die "unknown engine: $ENGINE (expected claude, codex or opencode)" ;;
   esac
+}
+
+uses_engine() { # uses_engine <engine> — どれかのフェーズがそのエンジンで動くか
+  local p
+  for p in $PHASES; do
+    [ "$(engine_for "$p")" = "$1" ] && return 0
+  done
+  return 1
+}
+
+resolve_codex_sandbox() { # Codex sandbox の実効値を CODEX_SANDBOX に、出どころを CODEX_SANDBOX_FROM に決める
+  # 環境変数 → state.codex.sandbox → workspace-write。state に持たせるのは、起動コマンドの環境変数は
+  # 次のマイルストーンに引き継がれず、付け忘れると Docker 等が使えずに verify が BLOCKED になるため
+  CODEX_SANDBOX_STATE=$(jq -r '.codex.sandbox // "" | tostring' "$STATE" 2>/dev/null)
+  if [ -n "${GSD_LITE_CODEX_SANDBOX:-}" ]; then
+    CODEX_SANDBOX=$GSD_LITE_CODEX_SANDBOX; CODEX_SANDBOX_FROM=GSD_LITE_CODEX_SANDBOX
+  elif [ -n "$CODEX_SANDBOX_STATE" ]; then
+    CODEX_SANDBOX=$CODEX_SANDBOX_STATE; CODEX_SANDBOX_FROM=state.codex.sandbox
+  else
+    CODEX_SANDBOX=workspace-write; CODEX_SANDBOX_FROM=default
+  fi
+}
+
+codex_sandbox_summary() { # --status / --check 用の 1 行（Codex を使うフェーズがあるときだけ）
+  uses_engine codex || return 0
+  resolve_codex_sandbox
+  echo "sandbox   : $CODEX_SANDBOX ($CODEX_SANDBOX_FROM)"
 }
 
 skill_dir_for() { # skill_dir_for <engine> — エンジンがプロジェクト内で探すスキル配置先
@@ -398,7 +487,11 @@ check_config() {
         (.key == "research" or .key == "plan" or .key == "impl" or .key == "verify" or .key == "reflect") and
         (.value == "claude" or .value == "codex" or .value == "opencode")))
   ' "$STATE" >/dev/null || die "invalid engine / phase_engines configuration"
-  CODEX_SANDBOX="${GSD_LITE_CODEX_SANDBOX:-workspace-write}"
+  resolve_codex_sandbox
+  if [ -n "${GSD_LITE_CODEX_SANDBOX:-}" ] && [ -n "$CODEX_SANDBOX_STATE" ] && [ "$GSD_LITE_CODEX_SANDBOX" != "$CODEX_SANDBOX_STATE" ] &&
+     uses_engine codex; then
+    echo "gsd-lite: WARN GSD_LITE_CODEX_SANDBOX=$GSD_LITE_CODEX_SANDBOX overrides state.codex.sandbox ($CODEX_SANDBOX_STATE)" >&2
+  fi
   for check_phase in $PHASES; do
     # reflect: false のプロジェクトは reflect ターンが来ないので、そのスキル・CLI は要求しない
     # （jq の // は false も未設定扱いにするので == false で判定する）
@@ -411,7 +504,7 @@ check_config() {
     if [ "$ENGINE" = codex ]; then
       case "$CODEX_SANDBOX" in
         read-only|workspace-write|danger-full-access) ;;
-        *) die "invalid Codex sandbox: $CODEX_SANDBOX" ;;
+        *) die "invalid Codex sandbox: $CODEX_SANDBOX (from $CODEX_SANDBOX_FROM; read-only, workspace-write or danger-full-access)" ;;
       esac
     fi
     [ -f "$skill_dir/gsd-lite-$check_phase/SKILL.md" ] ||
@@ -423,6 +516,9 @@ check_config() {
   check_claude_tokens
   check_claude_trust
   check_agent_instructions
+  if [ -n "${GSD_LITE_ON_BLOCKED:-}" ] && { [ ! -x "$GSD_LITE_ON_BLOCKED" ] || [ -d "$GSD_LITE_ON_BLOCKED" ]; }; then
+    echo "gsd-lite: WARN GSD_LITE_ON_BLOCKED is not an executable file: $GSD_LITE_ON_BLOCKED — BLOCKED will not be notified through it" >&2
+  fi
 }
 
 check_agent_instructions() {
@@ -652,7 +748,8 @@ check_codex_sandbox() {
   command -v timeout >/dev/null && timeout_cmd=(timeout -k 5 60)
   if ! "${timeout_cmd[@]}" "$codex_bin" sandbox -c "sandbox_mode=\"$CODEX_SANDBOX\"" -- true </dev/null >/dev/null 2>&1; then
     die "Codex sandbox '$CODEX_SANDBOX' cannot run commands on this machine (bubblewrap / unprivileged user namespace が使えない環境の可能性。Ubuntu 24.04 では kernel.apparmor_restrict_unprivileged_userns=1 が典型).
-  対処: (a) GSD_LITE_CODEX_SANDBOX=danger-full-access で起動（sandbox なし。無人ターンが FS 全体に書けるので隔離環境向け）
+  対処: (a) state.json の codex.sandbox を \"danger-full-access\" にしてコミット（sandbox なし。無人ターンが FS 全体に書けるので隔離環境向け。
+            一時的なら GSD_LITE_CODEX_SANDBOX=danger-full-access で起動）
         (b) unprivileged user namespace を許可する（例: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0）
         (c) impl / verify を Claude に切り替える（state の phase_engines）
   この検証を飛ばすには GSD_LITE_CODEX_SANDBOX_PROBE=skip"
@@ -845,9 +942,11 @@ status() {
   done
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
   echo "subagents : $(sget '.subagents // "auto"')"
+  codex_sandbox_summary
   token_summary
   trust_summary
   limits_summary
+  notify_summary
   usage_summary
   if [ -f "$STOPFILE" ]; then
     echo "stop      : requested (cleared on next start)"
@@ -960,10 +1059,12 @@ case "${1:-}" in
     command -v jq >/dev/null || die "jq is required"
     require_state
     check_config
+    codex_sandbox_summary
     token_summary
     trust_summary
     check_limit_values
     limits_summary
+    notify_summary
     echo "gsd-lite: execution configuration ready"
     exit 0 ;;
   "") ;;
@@ -997,7 +1098,8 @@ if [ -n "${GSD_LITE_IN_SCOPE:-}" ]; then
 else
   rm -f "$SCOPEFILE"
 fi
-echo "gsd-lite: start $(date -Iseconds) pid $$ mode=$MODE${SLUG:+ slug=$SLUG}$([ "$TARGET" = . ] || echo " target=$TARGET")${GSD_LITE_IN_SCOPE:+ scope=$GSD_LITE_IN_SCOPE (${GSD_LITE_SCOPE_LIMITS:-})} (append to logs/loop.log with >> so restarts keep earlier lines)"
+echo "gsd-lite: start $(date -Iseconds) pid $$ mode=$MODE${SLUG:+ slug=$SLUG}$([ "$TARGET" = . ] || echo " target=$TARGET")$(uses_engine codex && echo " codex_sandbox=$CODEX_SANDBOX")${GSD_LITE_IN_SCOPE:+ scope=$GSD_LITE_IN_SCOPE (${GSD_LITE_SCOPE_LIMITS:-})} (append to logs/loop.log with >> so restarts keep earlier lines)"
+LOOP_STARTED=1   # 以降の die は on-exit / on-blocked を通して終える
 trap 'rm -f "$PIDFILE" "$SCOPEFILE"' EXIT
 trap 'finish 130' INT TERM
 
@@ -1111,6 +1213,7 @@ while true; do
       < /dev/null > "$rawlog" 2>&1 9>&-
   )
   rc=$?
+  TURN_RAN=1
   finalize_turn_log
   usage_json=$(turn_usage)
   [ -n "$usage_json" ] && echo "$usage_json" | jq -e 'type == "object"' >/dev/null 2>&1 || usage_json='{}'

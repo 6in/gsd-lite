@@ -43,6 +43,13 @@
 > init（in-repo 形）が組を確かめて作る・直し方を提案する。`--check` と起動時は、使うエンジンが読めない形なら WARN
 > （止めない。`GSD_LITE_INSTRUCTIONS_CHECK=skip`）。スキルは AGENTS.md を本体として読み、reflect は繰り返し効く
 > 作業上の決まりに `（AGENTS.md 候補）` を付け、次の discuss が採否を決めて AGENTS.md に足す。
+> ループ本体追補（2026-10-23、achat の振り返りから。Issue #1）: Codex の sandbox を `state.codex.sandbox` に持つ
+> （優先順は `GSD_LITE_CODEX_SANDBOX` → state → `workspace-write`。起動コマンドの環境変数は次のマイルストーンに
+> 引き継がれず、付け忘れて verify が Docker を使えず BLOCKED になったため。`--status` / `--check` / 開始行に表示）。
+> Claude のターンで `result` が複数出る（バックグラウンド実行の完了通知で再開した）場合、`usage` / `num_turns` /
+> `permission_denials` は区間ごとの値なので全区間を合計・連結し、`segments` に区間数を残す。BLOCKED で止まったとき
+> （このプロセスのターンで BLOCKED になった場合と、ループ開始後の前提エラー）に `hooks/on-blocked.sh` と
+> `GSD_LITE_ON_BLOCKED` を呼ぶ。ループ開始後の前提エラーも on-exit を通して終える（§7）。
 > 詳細なインストール・移行・権限設定は [README の Codex 手順](../README.md#codex-で使う) /
 > [OpenCode 手順](../README.md#opencode-で使う) を参照。
 
@@ -176,6 +183,7 @@ gsd-lite/
     ├── archive/<slug>/         # 完了済みマイルストーンの成果物（次の discuss 開始時に退避）
     ├── hooks/on-exit.sh        # 任意。存在すればループ終了時に呼ばれる（通知等はユーザー実装）
     ├── hooks/on-phase.sh       # 任意。フェーズ遷移時に呼ばれる（進捗のプッシュ通知用）
+    ├── hooks/on-blocked.sh     # 任意。BLOCKED で止まったときに呼ばれる（人を呼ぶ通知用。サンプルは templates/hooks/）
     └── logs/<milestone>/turn-NNN-attemptN.log    # 各ターンの最終メッセージ（マイルストーン別）
         logs/<milestone>/turn-NNN-attemptN.jsonl  # Claude のターンのイベント列（stream-json。使用量の元データ）
         logs/<milestone>/turns.jsonl              # 1 試行 1 行の計測（所要・進捗・コミット数・使用量）
@@ -513,9 +521,12 @@ done
   次のターンは使用率（5 時間枠と 7 日枠の大きい方。リセット済みの枠は 0、記録なしも 0）が最も低い変数を選び、
   同率なら順番どおり。rejected で使用率が来なかった枠は 1 とみなす。`GSD_LITE_TOKEN_PICK=round-robin` で従来の
   順番どおり。`--tokens` で共有ファイルを表示する（進捗判定には使わない）
-- **使用量の記録**: Claude のターンは `--output-format stream-json --verbose` で起動し、最後の `result`
+- **使用量の記録**: Claude のターンは `--output-format stream-json --verbose` で起動し、`result`
   イベントから `usage` / `total_cost_usd` / `num_turns` / `permission_denials` を、`rate_limit_event` から
   利用枠の使用率を取り出して `turns.jsonl` に足す（Codex はログ末尾の `tokens used` の合計のみ）。
+  バックグラウンド実行の完了通知で再開したターンは `result` が区間ごとに複数出る。`usage` / `num_turns` /
+  `permission_denials` は区間ごとの値なので合計・連結し、`total_cost_usd` / `duration_api_ms` は累積値なので
+  最後の値を使う（`segments` に区間数）。
   進捗判定には使わない（ループがダムである点は変わらず、記録する列が増えるだけ）。利用上限の判定は
   平文ログ（最終メッセージ）に対して行うので、ツール出力に `rate limit` の語があっても誤認しない。
   `rate_limit_event` の `status` が `rejected` のときも利用上限として扱う。`GSD_LITE_CLAUDE_STREAM=off` で無効
@@ -545,7 +556,14 @@ done
     情報ファイルに格下げ。起動元セッションを閉じてもループは生き続ける（setsid でデタッチ済み）
 - **終了フック**: いかなる理由でも終了する直前に、`.gsd-lite/hooks/on-exit.sh` が存在し
   実行可能なら `on-exit.sh <exit_code> <phase>` として呼ぶ。通知（ntfy / desktop 等）は
-  ユーザーがこのフックに任意実装する。フックの失敗はループの終了コードに影響させない
+  ユーザーがこのフックに任意実装する。フックの失敗はループの終了コードに影響させない。
+  ループ開始後（排他取得後）の前提エラー（対象のブランチ違い等）も、終了コード 6 でこのフックを通す
+- **BLOCKED 通知フック**: 人の対応待ちで止まるとき、on-exit より先に `hooks/on-blocked.sh` と
+  環境変数 `GSD_LITE_ON_BLOCKED`（マシン共通のスクリプトのパス。宛先をリポジトリに置かないため）を
+  `<BLOCKED.md のパス> <理由の 1 行> <終了コード>` で呼ぶ。対象は、このプロセスのターンで BLOCKED に
+  なったとき（auto-BLOCKED とエージェントが書いた BLOCKED。終了コード 2。理由は BLOCKED.md の見出しと
+  空行を除いた最初の行）と、ループ開始後の前提エラー（終了コード 6。パスは空、理由はエラーの 1 行目）。
+  起動時からすでに BLOCKED のとき（人が再起動しただけ）や起動前の前提エラーでは呼ばない。失敗は無視する
 - **フェーズ遷移フック**: 各ターン後に phase の変化を検知したら、
   `hooks/on-phase.sh <旧phase> <新phase>` が存在すれば呼ぶ（プッシュ通知用。
   失敗は無視）。loop.sh は毎周 state を読んでいるので追加コストはない
@@ -574,7 +592,7 @@ done
   シェル実行・apply_patch が全て失敗する（値は妥当なので `--check` を素通りし、
   最初の Codex ターンが 3 回無進捗で auto-BLOCKED になる）。Codex を使うフェーズが
   あり sandbox が `danger-full-access` 以外なら `codex sandbox -c sandbox_mode=... -- true`
-  を起動前に実行し、失敗時は対処（`GSD_LITE_CODEX_SANDBOX=danger-full-access` /
+  を起動前に実行し、失敗時は対処（state の `codex.sandbox` を `danger-full-access` に /
   カーネル設定 / Claude への切り替え）を示して終了コード 6。
   `GSD_LITE_CODEX_SANDBOX_PROBE=skip` で省略可、`codex sandbox` 非対応の旧版は WARN のみ
 - 無人ターンでは MCP ツールの承認プロンプトに応答できない。Codex 側で
@@ -690,7 +708,8 @@ discuss で選んだ資源の上限（state の `limits`）があれば、同じ
 | 3 | max_turns | 進捗と PLAN を確認し、必要なら max_turns を増やして再実行 |
 | 4 | discuss 未完了 | 対話セッションで /gsd-lite-discuss を先に実行 |
 
-通知が欲しければ `.gsd-lite/hooks/on-exit.sh` に ntfy 等を書いておく。
+通知が欲しければ `.gsd-lite/hooks/on-exit.sh` に ntfy 等を書いておく。BLOCKED だけを知らせたいなら
+`.gsd-lite/hooks/on-blocked.sh`（または `GSD_LITE_ON_BLOCKED`）。
 
 ### 5. 次のマイルストーン
 

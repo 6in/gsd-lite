@@ -10,6 +10,17 @@ gsd-lite の利用者から見た変更を、新しい順に記録する。バ�
 ## 2026-10-23
 
 ### 追加
+- **Codex の sandbox を `state.json` の `codex.sandbox` に保存する**。優先順位は `GSD_LITE_CODEX_SANDBOX` → `codex.sandbox`
+  → `workspace-write`。discuss が選び、次のマイルストーンにも引き継がれる（起動コマンドの環境変数を付け忘れて、
+  verify が Docker を使えずに BLOCKED になったため）。`--status` / `--check` の `sandbox` 行と loop.log の開始行に
+  実効値を出し、環境変数が state と食い違えば WARN（Issue #1）
+- **BLOCKED の通知フック**: このループのターンで BLOCKED になったとき（auto-BLOCKED とエージェントが書いた BLOCKED）と、
+  ループ開始後の前提エラーで止まったときに、`.gsd-lite/hooks/on-blocked.sh` と `GSD_LITE_ON_BLOCKED`（マシン共通の
+  スクリプトのパス）を `<BLOCKED.md のパス> <理由の 1 行> <終了コード>` で呼ぶ。サンプルは `templates/hooks/on-blocked.sh`
+  （ntfy / Slack / メール / デスクトップ通知）。`--status` / `--check` の `notify` 行に通知先を出す（無ければ `none`）（Issue #1）
+- discuss は前回の DECISIONS にある環境変数付きの起動コマンドを見せ、state に移せるものは移し、残りを今回も付けるか確認する。
+  `notify` 行が `none` なら BLOCKED の通知をどうするか聞く（Issue #1）
+- `turns.jsonl` の `segments`（そのターンの `result` の数）
 - **エージェント向けの指示ファイルの方針**（`docs/agent-instructions.md`）。AGENTS.md を全エンジン共通の本体にし、
   CLAUDE.md は 1 行目の `@AGENTS.md` で取り込む組を推奨する（Claude Code は CLAUDE.md、Codex は AGENTS.md しか
   自動で読まないため）
@@ -24,6 +35,13 @@ gsd-lite の利用者から見た変更を、新しい順に記録する。バ�
 
 ### 変更
 - 各フェーズのスキルは規約を AGENTS.md（無ければ CLAUDE.md）から読む。plan は AGENTS.md を書き換えない
+- Codex sandbox の検証で止まったときの案内は、環境変数ではなく state の `codex.sandbox` を勧める
+
+### 修正
+- バックグラウンド実行の完了通知で再開した Claude のターンで、`turns.jsonl` の `usage` / `num_turns` /
+  `permission_denials` が最後の区間だけになっていた。全区間を合計・連結して記録する（`cost_usd` は従来どおり累積値）。
+  PROGRESS への承認待ちの追記も全区間の件数になる（Issue #1）
+- ループ開始後の前提エラー（対象のブランチ違い等で終了コード 6）で `on-exit.sh` が呼ばれていなかった
 
 ## 2026-10-20
 

@@ -6,7 +6,7 @@ trap 'rm -rf "$TESTROOT"' EXIT
 LOOP=$(cd "$(dirname "$0")/.." && pwd)/bin/gsd-lite-loop.sh
 REPO_DIR=$(dirname "$(dirname "$LOOP")")
 # 呼び出し元のエンジン設定をテストに持ち込まない。
-unset GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL GSD_LITE_CLAUDE_TOKEN_VARS CLAUDE_CODE_OAUTH_TOKEN GSD_LITE_MEMORY_MAX GSD_LITE_MEMORY_SWAP_MAX GSD_LITE_CPU_QUOTA GSD_LITE_IN_SCOPE GSD_LITE_SCOPE_LIMITS GSD_LITE_TOKEN_PICK
+unset GSD_LITE_ON_BLOCKED GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL GSD_LITE_CLAUDE_TOKEN_VARS CLAUDE_CODE_OAUTH_TOKEN GSD_LITE_MEMORY_MAX GSD_LITE_MEMORY_SWAP_MAX GSD_LITE_CPU_QUOTA GSD_LITE_IN_SCOPE GSD_LITE_SCOPE_LIMITS GSD_LITE_TOKEN_PICK
 # トークンの利用枠の共有ファイルは利用者のもの（~/.local/state）を触らない
 export GSD_LITE_TOKEN_LIMITS="$TESTROOT/token-limits.json"
 # スタブは `codex sandbox` を実装しないので、sandbox probe は専用テスト以外で飛ばす。
@@ -1332,6 +1332,137 @@ grep -q 'WARN.*\(CLAUDE\|AGENTS\)\.md' "$TESTROOT/check.log" && ng "no instructi
 cd "$TESTROOT/t46claude"
 GSD_LITE_INSTRUCTIONS_CHECK=skip GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" check46 >/dev/null
 grep -q 'WARN CLAUDE.md is a symlink' "$TESTROOT/check.log" && ng "INSTRUCTIONS_CHECK=skip should bypass" || ok "INSTRUCTIONS_CHECK=skip bypasses"
+
+echo "== Test 47: バックグラウンド待ちで result が複数出たターンは、全区間の usage を合計する =="
+cat > "$TESTROOT/bin/claude-stream-segments" <<'EOF'
+#!/usr/bin/env bash
+# run_in_background の完了通知で 2 回再開したターンの代役。usage / num_turns / permission_denials は区間ごと、
+# total_cost_usd / duration_api_ms は累積で出る（実機の claude -p と同じ）
+"$(dirname "$0")/claude-happy" "$@" > /dev/null
+cat <<'JSON'
+{"type":"result","subtype":"success","is_error":false,"num_turns":74,"duration_api_ms":1000,"total_cost_usd":1.0,"result":"started tests in background","usage":{"input_tokens":84,"output_tokens":26522,"cache_read_input_tokens":4000,"cache_creation_input_tokens":100},"permission_denials":[{"tool_name":"Bash","tool_input":{"command":"ps aux"}}]}
+{"type":"system","subtype":"task_notification"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":19,"duration_api_ms":1500,"total_cost_usd":1.4,"result":"tests done","usage":{"input_tokens":26,"output_tokens":4733,"cache_read_input_tokens":2000,"cache_creation_input_tokens":10},"permission_denials":[]}
+{"type":"system","subtype":"task_notification"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_api_ms":1600,"total_cost_usd":1.5,"result":"final answer","usage":{"input_tokens":4,"output_tokens":105,"cache_read_input_tokens":300,"cache_creation_input_tokens":1},"permission_denials":[{"tool_name":"WebFetch","tool_input":{"url":"https://example.com"}}]}
+JSON
+EOF
+chmod +x "$TESTROOT/bin/claude-stream-segments"
+make_project "$TESTROOT/u47"
+echo "# PROGRESS" > .gsd-lite/PROGRESS.md
+commit_state '.max_turns=1'
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-stream-segments" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "segmented turn ran" "$?" "3"
+assert_eq "usage summed over all segments" "$(jq -c 'select(.turn==1) | .usage' .gsd-lite/logs/toy/turns.jsonl)" '{"input_tokens":114,"output_tokens":31360,"cache_read_input_tokens":6300,"cache_creation_input_tokens":111}'
+assert_eq "num_turns summed, cumulative cost / api time taken from the last segment" "$(jq -r 'select(.turn==1) | "\(.num_turns) \(.cost_usd) \(.duration_api_ms) \(.segments)"' .gsd-lite/logs/toy/turns.jsonl)" "94 1.5 1600 3"
+assert_eq "permission denials of every segment" "$(jq -c 'select(.turn==1) | [.permission_denials, .permission_denial_heads]' .gsd-lite/logs/toy/turns.jsonl)" '[["Bash","WebFetch"],["Bash: ps","WebFetch"]]'
+assert_eq "PROGRESS append counts every segment" "$(tail -n 1 .gsd-lite/PROGRESS.md)" '- 承認待ち（ループ計測・turn 1）: 2 件 — Bash: ps, WebFetch'
+# 区間が 1 つの従来のターンは segments 1
+make_project "$TESTROOT/u47b"
+commit_state '.max_turns=1'
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-stream" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "single result -> segments 1, values unchanged" "$(jq -c 'select(.turn==1) | [.segments, .num_turns, .usage.output_tokens]' .gsd-lite/logs/toy/turns.jsonl)" '[1,3,20]'
+
+echo "== Test 48: Codex sandbox を state.codex.sandbox で持ち、環境変数で上書きできる =="
+make_codex_project "$TESTROOT/c48"
+commit_state '.codex.sandbox="danger-full-access" | .max_turns=1'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "state sandbox run" "$?" "3"
+grep -Fxq danger-full-access .gsd-lite/stub-args.log && ok "Codex gets the sandbox from state" || ng "state sandbox not passed ($(paste -sd' ' .gsd-lite/stub-args.log))"
+grep -Fxq workspace-write .gsd-lite/stub-args.log && ng "default sandbox still passed" || ok "default sandbox not used"
+grep -q 'gsd-lite: start .* codex_sandbox=danger-full-access' "$TESTROOT/loop-out.log" && ok "start line shows the sandbox" || ng "start line sandbox"
+out=$("$LOOP" --status)
+echo "$out" | grep -q '^sandbox   : danger-full-access (state.codex.sandbox)' && ok "status shows the sandbox and its source" || ng "status sandbox ($out)"
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+grep -q '^sandbox   : danger-full-access (state.codex.sandbox)' "$TESTROOT/check.log" && ok "check shows the sandbox" || ng "check sandbox"
+# 環境変数は state より優先し、食い違いを警告する
+GSD_LITE_CODEX_SANDBOX=workspace-write GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+grep -q '^sandbox   : workspace-write (GSD_LITE_CODEX_SANDBOX)' "$TESTROOT/check.log" && ok "env overrides state" || ng "env override"
+grep -q 'WARN GSD_LITE_CODEX_SANDBOX=workspace-write overrides state.codex.sandbox (danger-full-access)' "$TESTROOT/check.log" && ok "override is warned" || ng "override WARN"
+# 不正な値は出どころ付きで止める
+commit_state '.codex.sandbox="full"'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "invalid state sandbox rejected" "$?" "6"
+grep -q 'invalid Codex sandbox: full (from state.codex.sandbox' "$TESTROOT/check.log" && ok "invalid sandbox names its source" || ng "invalid sandbox message"
+# 空文字（雛形の既定）は従来どおり workspace-write
+commit_state '.codex.sandbox=""'
+out=$("$LOOP" --status)
+echo "$out" | grep -q '^sandbox   : workspace-write (default)' && ok "empty sandbox falls back to workspace-write" || ng "empty sandbox default"
+# Codex を使わないなら表示しない
+make_project "$TESTROOT/c48b"
+out=$("$LOOP" --status)
+echo "$out" | grep -q '^sandbox' && ng "sandbox line without Codex phases" || ok "no sandbox line without Codex"
+assert_eq "templates carry codex.sandbox" "$(jq -r '.codex.sandbox | type' "$REPO_DIR/templates/state.json"),$(jq -r '.defaults.codex.sandbox | type' "$REPO_DIR/templates/config.json")" "string,string"
+
+echo "== Test 49: BLOCKED で止まったら on-blocked フック（hooks/on-blocked.sh と GSD_LITE_ON_BLOCKED）を呼ぶ =="
+add_blocked_hook(){
+  cat > .gsd-lite/hooks/on-blocked.sh <<'EOF'
+#!/usr/bin/env bash
+printf 'hook file=[%s] reason=[%s] code=[%s]\n' "$1" "$2" "$3" >> .gsd-lite/blocked.log
+EOF
+  chmod +x .gsd-lite/hooks/on-blocked.sh
+  echo .gsd-lite/blocked.log >> .gitignore
+  git add -A && git commit -qm "add on-blocked hook"
+}
+cat > "$TESTROOT/bin/notify-env" <<'EOF'
+#!/usr/bin/env bash
+printf 'env file=[%s] reason=[%s] code=[%s]\n' "$1" "$2" "$3" >> .gsd-lite/blocked.log
+EOF
+chmod +x "$TESTROOT/bin/notify-env"
+# 無しなら status / check がそう言う
+make_project "$TESTROOT/b49none"
+rm .gsd-lite/hooks/on-exit.sh
+"$LOOP" --status | grep -q '^notify    : none' && ok "status says nobody is notified" || ng "status notify none"
+# auto-BLOCKED（無進捗）: フックと環境変数の両方に、パス・理由・コード 2 を渡す
+make_project "$TESTROOT/b49auto"
+add_blocked_hook
+commit_state '.retry_max=0'
+GSD_LITE_ON_BLOCKED="$TESTROOT/bin/notify-env" GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-noop" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "auto-BLOCKED exit" "$?" "2"
+assert_eq "auto-BLOCKED notifies hook and env" "$(cat .gsd-lite/blocked.log)" "$(printf '%s\n%s' \
+  'hook file=[.gsd-lite/BLOCKED.md] reason=[ループが自動生成した BLOCKED です。ターンが state.json を（コミットまで含めて）] code=[2]' \
+  'env file=[.gsd-lite/BLOCKED.md] reason=[ループが自動生成した BLOCKED です。ターンが state.json を（コミットまで含めて）] code=[2]')"
+grep -q 'exit code=2' .gsd-lite/hooks.log && ok "on-exit still called after on-blocked" || ng "on-exit after on-blocked"
+GSD_LITE_ON_BLOCKED="$TESTROOT/bin/notify-env" "$LOOP" --status | grep -q "^notify    : hooks/on-blocked.sh, GSD_LITE_ON_BLOCKED=$TESTROOT/bin/notify-env, hooks/on-exit.sh (exit code 2)" && ok "status lists notifiers" || ng "status notify list"
+# 起動時からすでに BLOCKED なら（人が再起動しただけ）知らせない
+rm .gsd-lite/blocked.log
+"$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "restart on BLOCKED exits 2" "$?" "2"
+[ ! -e .gsd-lite/blocked.log ] && ok "no notification when the loop starts already BLOCKED" || ng "notified on restart"
+# エージェントが書いた BLOCKED: 見出しを飛ばした最初の行が理由
+cat > "$TESTROOT/bin/claude-blocker-md" <<'EOF'
+#!/usr/bin/env bash
+STATE=.gsd-lite/state.json
+t=$(mktemp); jq '.turn+=1 | .next_command="BLOCKED" | .phase="blocked"' "$STATE" > "$t" && mv "$t" "$STATE"
+printf '# BLOCKED — turn 1 / research\n\n## 理由\n\nDocker ソケットに permission denied\n\n## 選択肢\n- a\n' > .gsd-lite/BLOCKED.md
+git add -A >/dev/null && git commit -qm "stub blocked"
+EOF
+chmod +x "$TESTROOT/bin/claude-blocker-md"
+make_project "$TESTROOT/b49agent"
+add_blocked_hook
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-blocker-md" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "agent BLOCKED exit" "$?" "2"
+assert_eq "agent BLOCKED reason line" "$(cat .gsd-lite/blocked.log)" 'hook file=[.gsd-lite/BLOCKED.md] reason=[Docker ソケットに permission denied] code=[2]'
+# ループ開始後の前提エラー（ここでは不正な next_command）も、パスを空・コード 6 で知らせる
+make_codex_project "$TESTROOT/b49die"
+add_blocked_hook
+commit_state '.next_command="/../../outside"'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "mid-loop die exit" "$?" "6"
+assert_eq "mid-loop die notifies with code 6" "$(cat .gsd-lite/blocked.log)" 'hook file=[] reason=[invalid codex skill command: /../../outside] code=[6]'
+grep -q 'exit code=6' .gsd-lite/hooks.log && ok "on-exit called on mid-loop die" || ng "on-exit on die"
+# 起動前の前提エラーは従来どおりフックを呼ばない（人がその場で見ている）
+rm .gsd-lite/blocked.log .gsd-lite/hooks.log
+GSD_LITE_CODEX_BIN="$TESTROOT/missing" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "preflight die exit" "$?" "6"
+[ ! -e .gsd-lite/blocked.log ] && [ ! -e .gsd-lite/hooks.log ] && ok "no hooks for preflight errors" || ng "hooks on preflight error"
+# 実行できない GSD_LITE_ON_BLOCKED は --check で警告する
+GSD_LITE_ON_BLOCKED="$TESTROOT/nowhere" GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+grep -q 'WARN GSD_LITE_ON_BLOCKED is not an executable file' "$TESTROOT/check.log" && ok "check warns about a bad GSD_LITE_ON_BLOCKED" || ng "bad GSD_LITE_ON_BLOCKED WARN"
+# サンプルのフックはそのまま動く（送信先を選ばなければ標準エラーに 1 行）
+out=$(cd "$TESTROOT/b49agent" && "$REPO_DIR/templates/hooks/on-blocked.sh" .gsd-lite/BLOCKED.md "理由" 2 2>&1)
+assert_eq "sample hook exits 0" "$?" "0"
+echo "$out" | grep -q 'gsd-lite: b49agent が止まった（exit 2） — 理由' && ok "sample hook prints a line" || ng "sample hook output ($out)"
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
