@@ -31,6 +31,9 @@
 #                              Claude Code で trust 済み（~/.claude.json の projects[<cwd>].hasTrustDialogAccepted）か
 #                              起動前に確認する。未 trust だと claude -p は .claude/settings.json の allowlist を全部
 #                              無視するので、無人ターンが権限拒否で無進捗になる
+#   GSD_LITE_INSTRUCTIONS_CHECK auto / skip（デフォルト auto）。このディレクトリの指示ファイルが、使うエンジンに
+#                              読まれる組になっているか起動前に確かめて警告する（止めない）。推奨は AGENTS.md（本体）と
+#                              1 行目が @AGENTS.md の CLAUDE.md（docs/agent-instructions.md）
 #   GSD_LITE_CLAUDE_TOKEN_VARS 任意。Claude のターンで CLAUDE_CODE_OAUTH_TOKEN に使うトークンを
 #                              保持している環境変数「名」の空白区切りリスト（例 "TOK_ORG_A TOK_ORG_B"）。
 #                              設定すると Claude のターンごとにラウンドロビンで切り替える
@@ -419,6 +422,34 @@ check_config() {
   check_codex_sandbox
   check_claude_tokens
   check_claude_trust
+  check_agent_instructions
+}
+
+check_agent_instructions() {
+  # エンジンが自動で読む指示ファイルは違う（Claude Code は CLAUDE.md、Codex は AGENTS.md、OpenCode は AGENTS.md・
+  # 無ければ CLAUDE.md）。食い違うと、そのエンジンのターンだけプロジェクトの決まりを知らずに動く。
+  # 推奨の組は AGENTS.md（本体）+ 1 行目が @AGENTS.md の CLAUDE.md（docs/agent-instructions.md）。警告だけで止めない
+  local p e uses_claude=0 uses_codex=0 doc="docs/agent-instructions.md in gsd-lite"
+  [ "${GSD_LITE_INSTRUCTIONS_CHECK:-auto}" = skip ] && return 0
+  for p in $PHASES; do
+    e=$(engine_for "$p")
+    [ "$e" = claude ] && uses_claude=1
+    [ "$e" = codex ] && uses_codex=1
+  done
+  if [ -L CLAUDE.md ]; then
+    echo "gsd-lite: WARN CLAUDE.md is a symlink — Claude Code's Edit / Write refuse to write through it, so unattended turns cannot update the instructions. Replace it with a file whose first line is @AGENTS.md ($doc)" >&2
+    return 0
+  fi
+  if [ -f CLAUDE.md ] && [ ! -f AGENTS.md ] && [ "$uses_codex" -eq 1 ]; then
+    echo "gsd-lite: WARN only CLAUDE.md exists, but Codex reads AGENTS.md only — Codex turns will not see the project's rules. Move the shared rules to AGENTS.md and make CLAUDE.md start with @AGENTS.md ($doc)" >&2
+  fi
+  if [ -f AGENTS.md ] && [ "$uses_claude" -eq 1 ]; then
+    if [ ! -f CLAUDE.md ]; then
+      echo "gsd-lite: WARN AGENTS.md exists without CLAUDE.md — add a CLAUDE.md whose first line is @AGENTS.md so that Claude turns read the same rules ($doc)" >&2
+    elif ! grep -qE '^[[:space:]]*@(\./)?AGENTS\.md[[:space:]]*$' CLAUDE.md; then
+      echo "gsd-lite: WARN CLAUDE.md does not import AGENTS.md — Claude Code skips AGENTS.md when CLAUDE.md exists, so Claude turns will not see it. Put @AGENTS.md on the first line of CLAUDE.md ($doc)" >&2
+    fi
+  fi
 }
 
 check_target() {

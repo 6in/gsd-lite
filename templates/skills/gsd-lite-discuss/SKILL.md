@@ -52,8 +52,8 @@ in-repo 形では以下の「gsd-control 形」の注記を無視し、従来ど
 - **対象の準備**: `[ -d $TARGET/.git ] || git clone <targets.<name>.url> $TARGET`。
   `git -C $TARGET checkout <base>`、リモートがあれば `git -C $TARGET pull --ff-only origin <base>`。
   対象の作業ツリーが dirty なら扱いを相談する
-- **対象の規約を読む**: `$TARGET/CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、
-  要望を聞く前に読み、既存コードとの整合の質問に活かす（plan / impl も同じファイルを読む）
+- **対象の規約を読む**: `$TARGET/AGENTS.md`（全エンジン共通の本体。無ければ `CLAUDE.md`）と README は
+  自動では読み込まれないので、要望を聞く前に読み、既存コードとの整合の質問に活かす（plan / impl も同じファイルを読む）
 - **slug を早く決める**: 要望を聞いたら最初の AUQ で kebab-case の slug を確認し、
   `git checkout -b gsd-lite/<slug>`（制御側。いまいたブランチが制御側の base）と `mkdir -p $MS` を
   作ってから議論を始める（4 のインライン文書化の書き先が必要なため）。
@@ -103,6 +103,21 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
 新しいマイルストーンの要望を聞く前に直近 2 件の「次回への提案」を読み、discuss で
 確認すべき項目があれば初期フロンティアに加える）。`phase` が `discuss` 以外で done でもない
 場合は進行中のマイルストーンがあるので、ユーザーに状況を確認する（勝手に上書きしない）。
+
+**0-c. AGENTS.md 候補の採否**（修正ラウンドでも行う。gsd-control 形でも同じ）: 直近 2 件の振り返りの
+「次回への提案」のうち `（AGENTS.md 候補）` の付いたもので、まだ `$TARGET/AGENTS.md` に無く、過去の
+DECISIONS.md でも不採用になっていないものを、最初の AUQ のラウンドに 1 問ずつ（多ければ multiSelect で
+まとめて）入れて「AGENTS.md に足す / 足さない」を聞く。AGENTS.md は全エンジン共通の指示の本体で、
+どのエンジンのターンも自動で（gsd-control 形ではスキルが明示的に）読む。
+- 足すものは `$TARGET/AGENTS.md` の該当節に 1 項目 1 行で書く（「何をする / しない」と「しないとどうなるか」）。
+  AGENTS.md が無ければ作り、`$TARGET/CLAUDE.md` が無ければ 1 行目に `@AGENTS.md` だけの CLAUDE.md も作る
+  （CLAUDE.md があって `@AGENTS.md` を取り込んでいなければ、1 行目に足すかを同じ AUQ で聞く）。
+  CLAUDE.md には同じ内容を写さない
+- 採否は DECISIONS.md に「AGENTS.md: <決まり> — 採用 / 不採用（理由）」として残す
+- コミットは手順 5 のマイルストーンのコミットに含める。gsd-control 形では AGENTS.md は対象側のファイルなので、
+  手順 5 で対象側のブランチ `gsd-lite/<slug>` を切った直後に、対象側にだけ
+  `git -C $TARGET add AGENTS.md CLAUDE.md` → `git -C $TARGET commit -m "gsd-lite(discuss): <slug> AGENTS.md に作業上の決まりを追加"`
+  でコミットする（対象の base には直接コミットしない。MR / マージで base に入る）
 
 ## 1. プロトコル: デザインツリーとフロンティア
 
@@ -232,7 +247,8 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
      **対象側**に `git -C $TARGET checkout -b gsd-lite/<slug>`（対象の base から。base にコミットが
      あることを `git -C $TARGET rev-parse --verify HEAD` で確認）を作る。state の `branch` は
      対象側のブランチ名と base。state・REQUIREMENTS / DECISIONS は制御側にコミットし、対象側には
-     何もコミットしない（以下の in-repo 向け手順のうちブランチ作成は対象側、コミットは制御側と読み替える）
+     0-c で採った AGENTS.md / CLAUDE.md の変更だけをコミットする（以下の in-repo 向け手順のうちブランチ作成は
+     対象側、コミットは制御側と読み替える）
    - discuss で作成した要件・設定・スキル以外の未コミット変更を確認し、
      関係ない変更があれば扱いを相談する。今回生成したファイルは次のコミットに含める
    - 現在のブランチ（= base）名を控え、**base にコミットが存在することを確認する**
@@ -246,7 +262,8 @@ PROGRESS / VERIFICATION 等）を `.gsd-lite/archive/<前回のmilestone>/` へ�
      `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `subagents` / `reflect` / `limits` /
      `fix_round: 0` / `updated_at`（修正ラウンドは 0-a の記載どおり、ブランチを作らず
      `fix_round` / `phase` / `next_command` / `verify_round` / `updated_at` を更新）。
-     そのうえで REQUIREMENTS.md / DECISIONS.md / state.json と追加・更新したスキル・設定を一括コミット
+     そのうえで REQUIREMENTS.md / DECISIONS.md / state.json と追加・更新したスキル・設定
+     （in-repo 形では 0-c で更新した AGENTS.md / CLAUDE.md も）を一括コミット
      （`gsd-lite(discuss): <slug> 要件確定`）。
      **遷移（next_command）までコミットに含めるのが重要** — コミット後に state を
      いじると、git 復元時に要件確定済みなのに DISCUSS へ戻ってしまう

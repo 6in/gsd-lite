@@ -15,6 +15,8 @@ research → plan → impl → verify → 仕上げ（ローカルのみなら�
 
 紹介資料（初めて使う人向けのスライド）: [docs/gsd-lite-intro.pptx](docs/gsd-lite-intro.pptx)
 
+エージェント向けの指示ファイル（AGENTS.md / CLAUDE.md）の方針: [docs/agent-instructions.md](docs/agent-instructions.md)
+
 変更履歴: [CHANGELOG.md](CHANGELOG.md)
 
 ## インストール
@@ -561,6 +563,11 @@ gsd-lite-loop.sh --status   # フェーズ別の実行先・モデルと進捗�
   未 trust のまま残る。対処は、そのディレクトリで対話の `claude` を起動して trust を受け入れるか、
   claude を終了した状態で上のフラグを true にする。`GSD_LITE_CLAUDE_TRUST_CHECK=skip` で省略可。
   `--status` の `trust` 行でも確認できる
+- **指示ファイルの組**（警告のみ・止めない）: エンジンごとに自動で読む指示ファイルが違う
+  （Claude Code は CLAUDE.md、Codex は AGENTS.md）。Codex のフェーズがあるのに CLAUDE.md しか無い、
+  Claude のフェーズがあるのに CLAUDE.md が `@AGENTS.md` を取り込んでいない・CLAUDE.md が無い、
+  CLAUDE.md がシンボリックリンク、のときに WARN を出す（下の[指示ファイル](#エージェント向けの指示ファイルagentsmd--claudemd)）。
+  `GSD_LITE_INSTRUCTIONS_CHECK=skip` で省略可
 
 - **git 識別**: `git var GIT_COMMITTER_IDENT` が通ること。ループ自身も各ターンも
   state.json をコミットするため、`user.name` / `user.email` 未設定では進捗を残せない
@@ -572,6 +579,29 @@ gsd-lite-loop.sh --status   # フェーズ別の実行先・モデルと進捗�
   カーネル設定の変更、または impl / verify を Claude に切り替え）を案内する
 ループ自体は対話せず、保存された組み合わせで毎ターン実行先を切り替える。
 既存プロジェクトは再インストール後、init でスキルを更新すると選択手順が反映される。
+
+## エージェント向けの指示ファイル（AGENTS.md / CLAUDE.md）
+
+フェーズごとにエンジンを混ぜると、エンジンによって自動で読む指示ファイルが違う（Claude Code は CLAUDE.md、
+Codex は AGENTS.md、OpenCode は AGENTS.md・無ければ CLAUDE.md。Claude Code は CLAUDE.md があると AGENTS.md を読まない）。
+食い違うと一部のエンジンのターンだけがプロジェクトの決まりを知らずに動く（CLAUDE.md だけのプロジェクトで、
+Codex のターンが `gsd-lite-loop.sh --where` を相対パスで呼んで 6 回失敗した実例がある）。
+gsd-lite は次の組を推奨し、方針の全体を [docs/agent-instructions.md](docs/agent-instructions.md) にまとめている。
+
+| ファイル | 中身 |
+|---|---|
+| `AGENTS.md` | **本体**。全エンジン共通の指示をすべてここに書く |
+| `CLAUDE.md` | 1 行目に `@AGENTS.md`。その下には Claude Code だけに要る指示を書く。シンボリックリンクにはしない |
+
+- **init**（in-repo 形）が組を確かめる。どちらも無ければ組を作り（AGENTS.md は `templates/AGENTS.template.md`）、
+  AGENTS.md だけなら CLAUDE.md を足す。CLAUDE.md だけ・取り込み行が無い・シンボリックリンクのときは
+  直し方を提案し、承認されたときだけ直す。既存プロジェクトはスキル更新モードでも同じ確認をする
+- **`--check` と起動時**に、使うエンジンが読めない形なら WARN を出す（上の「実行前チェック」）
+- **スキル**は規約を AGENTS.md（無ければ CLAUDE.md）から読む。gsd-control 形では対象の指示ファイルが
+  自動では読まれないので、スキルが `work/<name>/AGENTS.md` を明示的に読む
+- **振り返り → AGENTS.md**: reflect は「次回への提案」のうち繰り返し効く作業上の決まりに `（AGENTS.md 候補）` と付け、
+  次の discuss がそれを採否確認して AGENTS.md に足す（採否は DECISIONS.md。gsd-control 形では対象側の
+  マイルストーンブランチにコミットし、MR で base に入る）
 
 ## 中断と再開
 
@@ -660,7 +690,7 @@ subagents / reflect / limits / max_turns / retry_max / verify_round_max / resear
 ### マイルストーンの流れ
 
 1. **discuss**（制御リポジトリで対話）: 対象を選び `work/<name>` を base に合わせて最新化、
-   対象の `CLAUDE.md` / `AGENTS.md` / README を読む（制御側から起動するので自動では読まれない）。
+   対象の `AGENTS.md`（無ければ `CLAUDE.md`）/ README を読む（制御側から起動するので自動では読まれない）。
    slug を決めたら制御側に `gsd-lite/<slug>` を切って `.gsd-lite/milestones/<slug>/` に要件を書き、
    最後に対象側にも `gsd-lite/<slug>` を切る。state は `config.json` の `defaults` から作られ、
    `target: {name, path}` と `branch: {name, base}`（対象側のブランチ）を持つ
@@ -699,8 +729,8 @@ subagents / reflect / limits / max_turns / retry_max / verify_round_max / resear
 注意:
 
 - **置くだけでは無人ターンは使わない。** impl は PLAN.md のタスクに従って動くので、discuss / plan の段階で
-  REQUIREMENTS や PLAN に「この作業は `/<スキル名>` を使う」と書くか、制御リポジトリのルートに `CLAUDE.md` を置いて
-  「`work/<name>` を触るときは `<スキル名>` を使う」と書いておく
+  REQUIREMENTS や PLAN に「この作業は `/<スキル名>` を使う」と書くか、制御リポジトリのルートに `AGENTS.md`（と `@AGENTS.md` だけの
+  `CLAUDE.md`）を置いて「`work/<name>` を触るときは `<スキル名>` を使う」と書いておく
 - `config.json` の `targets` は複数登録できるので、対象固有のスキルは `<対象名>-xxx` のように対象名を
   プレフィックスにしておくと、後で別の対象を足したときに混ざらない
 
@@ -722,7 +752,8 @@ subagents / reflect / limits / max_turns / retry_max / verify_round_max / resear
 
 ### 注意
 
-- 対象の `.claude/settings.json` や CLAUDE.md は読まれない。規約はスキルが対象のファイルを明示的に読む。
+- 対象の `.claude/settings.json` や AGENTS.md / CLAUDE.md は自動では読まれない。規約はスキルが対象の
+  AGENTS.md（無ければ CLAUDE.md）を明示的に読む。
   必要な allowlist は制御側に書く（init が `Bash(git:*)` `Bash(gh:*)` `Bash(glab:*)` と対象のテストランナーを足す）
 - リモート運用の判定は `work/<name>` の origin で行う。対象をローカルパスから clone すると origin が
   そのパスになるので、通常は clone URL（GitHub / GitLab）を登録する
