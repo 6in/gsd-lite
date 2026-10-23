@@ -73,6 +73,8 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
      **`.gsd-lite/state.json`（gsd-control では `.gsd-lite/milestones/*/` と `config.json` の `defaults`）と
      成果物には一切触れない**（進行中マイルストーンを壊さない）
    - 更新しない → 何もせず終了
+   - どちらを選んでも、in-repo 形なら続けて手順 4b（指示ファイルの組）の確認だけを行う。
+     直したときはその変更だけを別にコミットする（`gsd-lite: agent instructions`）
    （gsd-lite 本体を更新した後、既存プロジェクトに反映するのはこの手順。
    install.sh はテンプレートを更新するだけで、配布済みプロジェクトには届かない）
    Codex / OpenCode への追加導入でもスキル更新は可能。既存 state の engine / phase_engines / model は変更しない。
@@ -138,6 +140,29 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
    `permission` で `deny` にしたものはそのまま拒否される。`ask` は無人ターンでは
    応答できないので自動承認扱い）。
 
+4b. **指示ファイルの組**（全エンジン共通）: エンジンごとに自動で読む指示ファイルが違う
+   （Claude Code は CLAUDE.md、Codex は AGENTS.md、OpenCode は AGENTS.md・無ければ CLAUDE.md。
+   Claude Code は CLAUDE.md があると AGENTS.md を読まない）。食い違うと一部のエンジンのターンだけが
+   プロジェクトの決まりを知らずに動く。推奨の組は **AGENTS.md（本体）+ 1 行目が `@AGENTS.md` の CLAUDE.md**
+   （詳細は gsd-lite の `docs/agent-instructions.md`）。状態は 1 回の Bash で見る（中身は読まない）:
+   ```bash
+   [ -L CLAUDE.md ] && echo "CLAUDE_SYMLINK -> $(readlink CLAUDE.md)"
+   [ -f AGENTS.md ] && echo "HAS_AGENTS"
+   [ -f CLAUDE.md ] && echo "HAS_CLAUDE"
+   grep -qE '^[[:space:]]*@(\./)?AGENTS\.md[[:space:]]*$' CLAUDE.md 2>/dev/null && echo "IMPORTS_AGENTS"
+   grep -nE '^[[:space:]]*@' CLAUDE.md 2>/dev/null | grep -vE '@(\./)?AGENTS\.md' | head -5
+   ```
+   | 状態 | すること |
+   |---|---|
+   | どちらも無い | 組を作る: `cp ~/.claude/gsd-lite/templates/AGENTS.template.md AGENTS.md && printf '@AGENTS.md\n' > CLAUDE.md`（Codex / OpenCode は上表のテンプレートの場所。シェル変数は Bash の呼び出しをまたいで残らないのでパスを書く）。作ったことを伝える |
+   | `HAS_AGENTS` だけ | `printf '@AGENTS.md\n' > CLAUDE.md` を作る |
+   | 両方あり `IMPORTS_AGENTS` | 何もしない |
+   | 両方あり、取り込み行が無い | AUQ「CLAUDE.md の 1 行目に `@AGENTS.md` を足す（推奨）/ そのまま」。足すなら `{ printf '@AGENTS.md\n\n'; cat CLAUDE.md; } > CLAUDE.md.tmp && mv CLAUDE.md.tmp CLAUDE.md`。同じ内容が両方に書かれていれば共通部分を AGENTS.md に寄せるよう伝える（二重管理になり片方だけ直して食い違う） |
+   | `HAS_CLAUDE` だけ | AUQ「中身を AGENTS.md に移し、CLAUDE.md を `@AGENTS.md` にする（推奨）/ そのまま」。移すなら `git mv CLAUDE.md AGENTS.md`（未追跡なら `mv`）のあと `printf '@AGENTS.md\n' > CLAUDE.md`。Claude Code の機能に依存する指示があれば CLAUDE.md の `@AGENTS.md` の下に戻すよう伝える。上の Bash で `@` 行（他ファイルの取り込み）が出ていたら、Codex / OpenCode は `@パス` を展開しないので、取り込み先の中身が要るなら AGENTS.md に書くかパスを示す一文にするよう伝える |
+   | `CLAUDE_SYMLINK` | Claude Code の Edit / Write はリンク経由の書き込みを拒否し、無人ターンが指示ファイルを直せない。AUQ「実ファイルに置き換える（推奨）/ そのまま」。リンク先が AGENTS.md なら `rm CLAUDE.md && printf '@AGENTS.md\n' > CLAUDE.md`、別のファイルならそのファイルの扱いをユーザーに聞く |
+
+   「そのまま」を選ばれたら何もしない（`gsd-lite-loop.sh --check` が同じ状態を WARN で知らせ続ける）。
+   作った・直したファイルは手順 6 のコミットに含める
 5. **.gitignore**: `.gsd-lite/logs/` と `.gsd-lite/loop.pid` を追記（なければ作成）
 6. **コミット**: 現在のブランチ（= 以後の base ブランチ）に
    `gsd-lite: scaffold` としてコミット
@@ -192,8 +217,11 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
   サブコマンド単位の許可では足りない
 - **C4. コミット**: 制御側の現在のブランチ（通常 main = 制御側の base）に `gsd-lite: scaffold (control)`
 - **C5. trust 確認と案内**: 手順 7 と同じ trust 確認を行う（制御リポジトリのディレクトリが対象）。
-  そのうえで「次は同じセッションで `/gsd-lite-discuss <やりたいこと>`。対象の CLAUDE.md /
-  AGENTS.md は自動では読まれないので、discuss / plan / impl が `work/<name>/CLAUDE.md` を明示的に読む」と伝える。
+  そのうえで「次は同じセッションで `/gsd-lite-discuss <やりたいこと>`。対象の AGENTS.md /
+  CLAUDE.md は自動では読まれないので、各フェーズのスキルが `work/<name>/AGENTS.md`（無ければ CLAUDE.md）を
+  明示的に読む」と伝える。対象リポジトリの指示ファイルは init では書き換えない（変えるなら対象側の MR で）。
+  対象に CLAUDE.md しか無い・CLAUDE.md が `@AGENTS.md` を取り込んでいない場合は、手順 4b の推奨の組を一言案内する。
+  制御リポジトリのルートに指示ファイルを置く場合（README「任意のスキルを使いたいとき」）も同じ組にする。
   ループは**制御リポジトリのルートで**制御ブランチ `gsd-lite/<slug>` にいる状態で起動する
   （`work/<name>` の中で起動すると state が見つからず終了コード 6）
 

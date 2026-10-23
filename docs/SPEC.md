@@ -31,13 +31,18 @@
 > （`defaults` + `targets`）が制御リポジトリの印で、`/gsd-lite-init` が生成する（テンプレートリポジトリは作らない）。
 > ループは対象の存在 / gitignore / git 識別 / マイルストーンブランチ一致を事前検証し、`turns.jsonl` に
 > `target_commits` を加える。スキルは冒頭で `$MS`（マイルストーンディレクトリ）と `$TARGET` を解決し、
-> 対象の CLAUDE.md / AGENTS.md を明示的に読む（制御側から起動するので自動では読まれない）。
+> 対象の AGENTS.md（無ければ CLAUDE.md）を明示的に読む（制御側から起動するので自動では読まれない）。
 > 完了後の制御側ブランチの扱い（制御 main へマージ / reflect だけ取り込む / 放置）は人間が選ぶ。
 > 試用（2026-09-26、todo-cli 15 ターン完走）の反映: `--where`（作業場所を key=value で表示。スキルはこれを 1 回呼び
 > リテラルパスで使う — Bash ツールはコール間で変数を保持しない）、`--check` / `--status` に Claude Code の trust 検証
 > （未 trust だと claude -p が allowlist を全部無視する）、起動時の開始行（loop.log は `>>` で追記）、
 > `verify_round_max` の既定 3、verify の round 1 格子プローブ / plan の採否表 / 例外の親クラス指定。
 > 詳細は [README の制御リポジトリ方式](../README.md#制御リポジトリ方式gsd-control)。
+> 指示ファイル追補（2026-10-23）: エンジンごとに自動で読む指示ファイルが違う（Claude Code は CLAUDE.md、Codex は
+> AGENTS.md）ため、AGENTS.md（本体）+ 1 行目が `@AGENTS.md` の CLAUDE.md の組を推奨する（[agent-instructions.md](agent-instructions.md)）。
+> init（in-repo 形）が組を確かめて作る・直し方を提案する。`--check` と起動時は、使うエンジンが読めない形なら WARN
+> （止めない。`GSD_LITE_INSTRUCTIONS_CHECK=skip`）。スキルは AGENTS.md を本体として読み、reflect は繰り返し効く
+> 作業上の決まりに `（AGENTS.md 候補）` を付け、次の discuss が採否を決めて AGENTS.md に足す。
 > 詳細なインストール・移行・権限設定は [README の Codex 手順](../README.md#codex-で使う) /
 > [OpenCode 手順](../README.md#opencode-で使う) を参照。
 

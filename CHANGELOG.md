@@ -7,6 +7,24 @@ gsd-lite の利用者から見た変更を、新しい順に記録する。バ�
 - 反映: ループ本体（`bin/gsd-lite-loop.sh`）の変更は `install.sh` で入れ直し、ループを再起動したときから効く。
   スキル・雛形の変更は、既存プロジェクトでは `gsd-lite-init` のスキル更新モードで取り込む
 
+## 2026-10-23
+
+### 追加
+- **エージェント向けの指示ファイルの方針**（`docs/agent-instructions.md`）。AGENTS.md を全エンジン共通の本体にし、
+  CLAUDE.md は 1 行目の `@AGENTS.md` で取り込む組を推奨する（Claude Code は CLAUDE.md、Codex は AGENTS.md しか
+  自動で読まないため）
+- **init が指示ファイルの組を整える**（in-repo 形）。どちらも無ければ組を作り（雛形 `templates/AGENTS.template.md`）、
+  AGENTS.md だけなら CLAUDE.md を足す。CLAUDE.md だけ・取り込み行が無い・シンボリックリンクのときは直し方を
+  提案し、承認されたときだけ直す。スキル更新モードでも確認する
+- **`--check` と起動時に指示ファイルの組を警告**（止めない）。Codex のフェーズがあるのに CLAUDE.md しか無い /
+  Claude のフェーズがあるのに CLAUDE.md が `@AGENTS.md` を取り込んでいない・CLAUDE.md が無い / CLAUDE.md が
+  シンボリックリンク。`GSD_LITE_INSTRUCTIONS_CHECK=skip` で省略
+- reflect は「次回への提案」のうち繰り返し効く作業上の決まりに `（AGENTS.md 候補）` と付け、discuss がそれを
+  採否確認して AGENTS.md に足す（採否は DECISIONS.md。gsd-control 形では対象側のマイルストーンブランチにコミット）
+
+### 変更
+- 各フェーズのスキルは規約を AGENTS.md（無ければ CLAUDE.md）から読む。plan は AGENTS.md を書き換えない
+
 ## 2026-10-20
 
 ### 追加

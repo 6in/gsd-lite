@@ -1294,5 +1294,44 @@ GSD_LITE_TOKEN_PICK=bogus TOK_A=x GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A" "$LOOP" --c
 assert_eq "invalid GSD_LITE_TOKEN_PICK fails --check" "$?" "6"
 export GSD_LITE_TOKEN_LIMITS="$TESTROOT/token-limits.json"
 
+echo "== Test 46: 指示ファイル（AGENTS.md / CLAUDE.md）の組が、使うエンジンに読まれる形か警告する =="
+check46(){ "$LOOP" --check > "$TESTROOT/check.log" 2>&1; echo $?; }
+# Codex のフェーズがあるのに CLAUDE.md しか無い → 警告（止めない）
+make_codex_project "$TESTROOT/t46codex"
+echo '- テストは make test' > CLAUDE.md
+assert_eq "CLAUDE.md only with Codex still passes --check" "$(GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" check46)" "0"
+grep -q 'WARN only CLAUDE.md exists, but Codex reads AGENTS.md only' "$TESTROOT/check.log" && ok "warns Codex will miss CLAUDE.md" || ng "Codex CLAUDE.md-only WARN"
+# 推奨の組なら何も言わない
+echo '- テストは make test' > AGENTS.md; printf '@AGENTS.md\n' > CLAUDE.md
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" check46 >/dev/null
+grep -q 'WARN.*\(CLAUDE\|AGENTS\)\.md' "$TESTROOT/check.log" && ng "recommended pair should not warn ($(cat "$TESTROOT/check.log"))" || ok "recommended pair passes silently (codex)"
+# Claude のフェーズ: CLAUDE.md が AGENTS.md を取り込んでいない → 警告
+make_project "$TESTROOT/t46claude"
+echo '- テストは make test' > AGENTS.md; echo '- Claude だけの決まり' > CLAUDE.md
+assert_eq "CLAUDE.md without @AGENTS.md still passes --check" "$(GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" check46)" "0"
+grep -q 'WARN CLAUDE.md does not import AGENTS.md' "$TESTROOT/check.log" && ok "warns Claude will skip AGENTS.md" || ng "missing import WARN"
+printf '@AGENTS.md\n\n- Claude だけの決まり\n' > CLAUDE.md
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" check46 >/dev/null
+grep -q 'WARN.*\(CLAUDE\|AGENTS\)\.md' "$TESTROOT/check.log" && ng "pair with Claude-only lines should not warn" || ok "recommended pair passes silently (claude)"
+# AGENTS.md だけ → CLAUDE.md を足すよう警告
+rm CLAUDE.md
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" check46 >/dev/null
+grep -q 'WARN AGENTS.md exists without CLAUDE.md' "$TESTROOT/check.log" && ok "warns when CLAUDE.md is missing" || ng "missing CLAUDE.md WARN"
+# シンボリックリンクは無人ターンが書けないので警告
+ln -s AGENTS.md CLAUDE.md
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" check46 >/dev/null
+grep -q 'WARN CLAUDE.md is a symlink' "$TESTROOT/check.log" && ok "warns about a symlinked CLAUDE.md" || ng "symlink WARN"
+# 起動時にも同じ警告が出る（ターンは進む）
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "loop still runs to DONE with the warning" "$?" "0"
+grep -q 'WARN CLAUDE.md is a symlink' "$TESTROOT/loop-out.log" && ok "warning also on start" || ng "start WARN"
+# 指示ファイルが無いプロジェクトや skip では何も言わない
+make_project "$TESTROOT/t46none"
+GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" check46 >/dev/null
+grep -q 'WARN.*\(CLAUDE\|AGENTS\)\.md' "$TESTROOT/check.log" && ng "no instruction files should not warn" || ok "no instruction files, no warning"
+cd "$TESTROOT/t46claude"
+GSD_LITE_INSTRUCTIONS_CHECK=skip GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-happy" check46 >/dev/null
+grep -q 'WARN CLAUDE.md is a symlink' "$TESTROOT/check.log" && ng "INSTRUCTIONS_CHECK=skip should bypass" || ok "INSTRUCTIONS_CHECK=skip bypasses"
+
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

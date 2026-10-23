@@ -33,8 +33,8 @@ slug=<slug>
 - `$TARGET` = コードを書く対象リポジトリ。`.` なら今いるリポジトリ（従来どおり）。`work/<name>` なら
   gsd-control 形で、**コードの読み書き・テスト・コミット・ブランチ・マージ・push は `git -C <target>` /
   `cd <target>` で対象側に**、**`$MS/` の成果物と state.json はこのリポジトリ（制御側）に**コミットする。
-  対象側の `CLAUDE.md` / `AGENTS.md` / README は自動では読み込まれないので、`<target>/CLAUDE.md` 等が
-  あれば最初に読んで規約に従う。`<target>` の中身を制御側に `git add` しない（gitignore 済み）
+  対象側の指示ファイルと README は自動では読み込まれないので、最初に `<target>/AGENTS.md`（全エンジン共通の本体。
+  無ければ `<target>/CLAUDE.md`）を読んで規約に従う。CLAUDE.md の `@AGENTS.md` より下は Claude 固有の指示。`<target>` の中身を制御側に `git add` しない（gitignore 済み）
 - `.gsd-lite/logs/` と `.gsd-lite/reflect/` はどちらの形でも共通の場所（マイルストーンをまたいで蓄積）。
   一時ファイル（プローブ用スクリプト等）が必要なら `/tmp` ではなく `.gsd-lite/logs/<slug>/scratch/` に置く
   （`/tmp` への書き込みは allowlist 外で権限拒否になる。logs/ は gitignore 済み）
@@ -135,10 +135,16 @@ slug=<slug>
 
 - [ ] <PLAN 粒度 / allowlist / スキル・テンプレート / discuss で聞くべきこと などの具体的な変更>
   （根拠になった Minus / Interesting）
+- [ ] <どのエンジンにも守ってほしい作業上の決まり 1 行>（根拠: ...）（AGENTS.md 候補）
 ```
 
 - 「次回への提案」は plan と discuss が読む。**具体的で、やるかどうかを判断できる粒度**で書く
   （「もっと注意する」は不可。「T3 のような DB マイグレーション込みタスクは 2 分割する」は可）
+- 提案のうち、マイルストーンをまたいで**このプロジェクトで繰り返し効く作業上の決まり**（コマンドの呼び方、
+  テストの走らせ方、触ってはいけないファイルなど。どのエンジンのターンにも守ってほしいもの）には、
+  末尾に `（AGENTS.md 候補）` と付ける。discuss がそれを採否確認し、採ったものを対象の AGENTS.md
+  （全エンジン共通の指示の本体）に足す。reflect 自身は AGENTS.md を書き換えない。既に AGENTS.md に
+  書かれているのに守られなかった決まりは、候補にせず Minus に「AGENTS.md にあるが守られなかった」と書く
 - 記録に矛盾があれば（PROGRESS が成功と言うが turns.jsonl は 3 試行など）それ自体を
   Interesting に書く
 - 書けるほどの記録がない（PROGRESS が空、turns.jsonl がない等）場合は、その事実と
