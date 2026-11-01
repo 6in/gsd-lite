@@ -83,6 +83,13 @@
 #   GSD_LITE_ON_BLOCKED        任意。BLOCKED で止まったときに呼ぶ実行ファイルのパス（マシン共通の通知スクリプト用）。
 #                              .gsd-lite/hooks/on-blocked.sh があればそれも呼ぶ。引数は <BLOCKED.md のパス> <理由の 1 行>
 #                              <終了コード>。ループ開始後に前提エラーで止まったとき（終了コード 6）も、パスを空にして呼ぶ
+#   AGENTMEM_TOKEN             任意。achat（agentmem MCP）のトークン。state の agentmem.url があり、この変数があれば、
+#                              ターンごとに MCP サーバー agentmem（agentmem.project）と agentmem-gsd（agentmem.shared_project）を
+#                              エンジンに渡す（Claude: --mcp-config、Codex: -c mcp_servers.*、OpenCode: OPENCODE_CONFIG_CONTENT）。
+#                              値は設定に書かず、各エンジンが環境変数から読む。未設定・achat に届かないときは WARN だけで、
+#                              ターンは achat なしで進む
+#
+# ターンの環境には GSD_LITE_UNATTENDED=1 を足す（無人ターンでだけ止めたいフックの目印。achat のフックなど）
 #
 # 計測: 各試行の phase / engine / model / attempt / 開始・終了時刻 / 所要秒 / rc / 進捗有無 /
 # 増えたコミット数を logs/<milestone>/turns.jsonl に 1 行ずつ追記する（reflect フェーズの客観材料）。
@@ -345,10 +352,12 @@ record_turn() { # 1 試行ぶんの計測値を logs/<milestone>/turns.jsonl に
     --argjson rc "$rc" --argjson progressed "$progressed" --argjson commits "${commits:-0}" \
     --arg head_before "$head_before" --arg head_after "$head_after" --arg log "$log" \
     --arg token_var "$token_var" --argjson target "$target_json" --argjson usage "$usage_json" \
+    --arg agentmem "${turn_agentmem:-}" \
     '{turn:$turn, phase:$phase, engine:$engine, model:$model, attempt:$attempt,
       started_at:$started, finished_at:$finished, duration_s:$duration, rc:$rc,
       progressed:$progressed, commits:$commits, head_before:$head_before, head_after:$head_after,
-      log:$log, token_var:$token_var} + $target + $usage' >> "$logdir/turns.jsonl" 2>/dev/null || true
+      log:$log, token_var:$token_var}
+     + (if $agentmem == "" then {} else {agentmem: ($agentmem | split(" "))} end) + $target + $usage' >> "$logdir/turns.jsonl" 2>/dev/null || true
 }
 
 usage_summary() { # --status 用: このマイルストーンの turns.jsonl に記録された使用量の合計（記録が無ければ何も出さない）
@@ -516,6 +525,7 @@ check_config() {
   check_claude_tokens
   check_claude_trust
   check_agent_instructions
+  check_agentmem
   if [ -n "${GSD_LITE_ON_BLOCKED:-}" ] && { [ ! -x "$GSD_LITE_ON_BLOCKED" ] || [ -d "$GSD_LITE_ON_BLOCKED" ]; }; then
     echo "gsd-lite: WARN GSD_LITE_ON_BLOCKED is not an executable file: $GSD_LITE_ON_BLOCKED — BLOCKED will not be notified through it" >&2
   fi
@@ -763,6 +773,11 @@ where() { # 作業場所の解決結果を key=value で表示（スキル向け
   echo "state=$STATE"
   echo "target=$TARGET"
   echo "slug=${SLUG:-$(sget '.milestone // empty')}"
+  # achat はターンの環境（AGENTMEM_TOKEN）とあわせて決まる。off ならスキルは achat を使わない
+  local names
+  names=$(agentmem_names)
+  echo "agentmem=$([ -n "$names" ] && echo on || echo off)"
+  echo "agentmem_servers=$names"
 }
 
 claude_config_file() { printf '%s\n' "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"; }
@@ -918,6 +933,102 @@ token_summary() { # トークン切り替えの状態 1 行（値は出さない
   echo "token     : rotation off (GSD_LITE_CLAUDE_TOKEN_VARS unset; parent CLAUDE_CODE_OAUTH_TOKEN / login is used)"
 }
 
+# ---- achat（agentmem MCP。任意）----
+# 学びをリポジトリ・マシンをまたいで共有する層。正本は git（reflect / AGENTS.md）のままで、使えなくてもループは止めない。
+# agentmem = 対象リポジトリの achat project、agentmem-gsd = gsd-lite を使う全リポジトリで共有する project。
+# 掲示板は project の中でしか検索できないので、gsd-lite 自体の学びは共有側に書く（docs/SPEC.md の achat 追補）
+
+agentmem_conf() { # agentmem_conf <key> — state.json の agentmem.<key>（無い・空なら空）
+  jq -r --arg key "$1" '(.agentmem // {})[$key] // empty | tostring' "$STATE" 2>/dev/null
+}
+
+agentmem_pairs() { # このターンにつなぐ "<サーバー名> <project slug>" を 1 行ずつ（url が空・トークン未設定なら何も出さない）
+  local p s
+  [ -n "$(agentmem_conf url)" ] && [ -n "${AGENTMEM_TOKEN:-}" ] || return 0
+  p=$(agentmem_conf project)
+  s=$(agentmem_conf shared_project)
+  [ -z "$p" ] || echo "agentmem $p"
+  [ -z "$s" ] || echo "agentmem-gsd $s"
+}
+
+agentmem_names() { agentmem_pairs | cut -d' ' -f1 | paste -sd' ' -; }
+
+agentmem_health_url() { local url; url=$(agentmem_conf url); printf '%s/healthz\n' "${url%/mcp}"; }
+
+check_agentmem() {
+  # 値の打ち間違いは止める（ヘッダ・TOML・JSON に埋め込むので形も守らせる）。届かない・トークンが無いのは WARN だけ
+  local url p s slug f health
+  url=$(agentmem_conf url); p=$(agentmem_conf project); s=$(agentmem_conf shared_project)
+  [ -n "$url$p$s" ] || return 0
+  [ -n "$url" ] || die "state.agentmem.project / shared_project are set but agentmem.url is empty (set the MCP URL shown on the achat portal, e.g. https://host/achat/mcp)"
+  [[ "$url" =~ ^https?://[A-Za-z0-9._~:/%-]+/mcp$ ]] ||
+    die "invalid agentmem.url: $url (the MCP endpoint ending with /mcp, e.g. https://host/achat/mcp; no credentials, query or spaces)"
+  for slug in "$p" "$s"; do
+    [ -z "$slug" ] || [[ "$slug" =~ ^[a-z0-9][a-z0-9_-]{1,62}$ ]] ||
+      die "invalid achat project slug: $slug (state.agentmem.project / shared_project; lowercase letters, digits, _ and -, 2-63 chars)"
+  done
+  if [ -z "$p$s" ]; then
+    echo "gsd-lite: WARN agentmem.url is set but neither agentmem.project nor agentmem.shared_project — achat is not connected" >&2
+  elif [ -z "${AGENTMEM_TOKEN:-}" ]; then
+    echo "gsd-lite: WARN AGENTMEM_TOKEN is not set — turns run without achat (export the token issued on the achat portal before starting)" >&2
+  fi
+  if [ -n "$p$s" ]; then
+    health=$(agentmem_health_url)
+    if ! command -v curl >/dev/null; then
+      echo "gsd-lite: WARN curl not found — cannot check that achat is reachable ($health)" >&2
+    elif ! curl -sf -m 3 -o /dev/null "$health" 2>/dev/null; then
+      echo "gsd-lite: WARN achat is unreachable ($health) — turns continue; achat tools fail until it is back" >&2
+    fi
+  fi
+  # achat のフック（SessionStart の digest / UserPromptSubmit の suggest）は claude -p でも動く。無人ターンでは
+  # suggest がスラッシュコマンドの文字列で検索して役に立たず、digest も毎ターン入る。無人ターンでは止めてもらう
+  uses_engine claude || return 0
+  for f in .claude/settings.json .claude/settings.local.json; do
+    [ -f "$f" ] || continue
+    if jq -e '[.hooks // {} | .. | objects | .command? // empty | strings
+               | select(test("/api/(digest|suggest)") and (test("GSD_LITE_UNATTENDED") | not))] | length > 0' "$f" >/dev/null 2>&1; then
+      echo "gsd-lite: WARN $f runs achat's hooks (/api/digest, /api/suggest) in unattended turns too — prefix each command with [ -n \"\${GSD_LITE_UNATTENDED:-}\" ] || (README: achat)" >&2
+    fi
+  done
+}
+
+agentmem_summary() { # --status / --check 用の 1 行
+  local url
+  url=$(agentmem_conf url)
+  if [ -z "$url" ]; then
+    echo "agentmem  : off (state.agentmem.url empty)"
+  elif [ -z "${AGENTMEM_TOKEN:-}" ]; then
+    echo "agentmem  : NOT connected — AGENTMEM_TOKEN unset ($url)"
+  elif [ -z "$(agentmem_pairs)" ]; then
+    echo "agentmem  : NOT connected — agentmem.project and agentmem.shared_project are empty ($url)"
+  else
+    echo "agentmem  : $url — $(agentmem_pairs | paste -sd',' - | sed 's/,/, /g')"
+  fi
+}
+
+agentmem_mcp_json() { # Claude の --mcp-config。トークンは ${AGENTMEM_TOKEN} の参照のまま書く（値をファイルに残さない）
+  agentmem_pairs | jq -Rn --arg url "$(agentmem_conf url)" '
+    {mcpServers: ([inputs | split(" ") | {key: .[0], value: {type: "http", url: $url,
+      headers: {"Authorization": "Bearer ${AGENTMEM_TOKEN}", "X-Project-Id": .[1]}}}] | from_entries)}'
+}
+
+agentmem_codex_args() { # Codex の -c 引数を 1 行 1 個で。承認なしにしないと approval_policy=never で全呼び出しが拒否される
+  local url name slug
+  url=$(agentmem_conf url)
+  agentmem_pairs | while read -r name slug; do
+    printf '%s\n' -c "mcp_servers.$name.url=\"$url\"" \
+      -c "mcp_servers.$name.bearer_token_env_var=\"AGENTMEM_TOKEN\"" \
+      -c "mcp_servers.$name.http_headers={\"X-Project-Id\"=\"$slug\"}" \
+      -c "mcp_servers.$name.default_tools_approval_mode=\"approve\""
+  done
+}
+
+agentmem_opencode_config() { # OPENCODE_CONFIG_CONTENT に重ねる JSON（{env:...} は OpenCode が展開する）
+  agentmem_pairs | jq -cRn --arg url "$(agentmem_conf url)" '
+    {mcp: ([inputs | split(" ") | {key: .[0], value: {type: "remote", url: $url, oauth: false,
+      headers: {"Authorization": "Bearer {env:AGENTMEM_TOKEN}", "X-Project-Id": .[1]}}}] | from_entries)}'
+}
+
 status() {
   require_state
   echo "== gsd-lite status =="
@@ -947,6 +1058,7 @@ status() {
   trust_summary
   limits_summary
   notify_summary
+  agentmem_summary
   usage_summary
   if [ -f "$STOPFILE" ]; then
     echo "stop      : requested (cleared on next start)"
@@ -1065,6 +1177,7 @@ case "${1:-}" in
     check_limit_values
     limits_summary
     notify_summary
+    agentmem_summary
     echo "gsd-lite: execution configuration ready"
     exit 0 ;;
   "") ;;
@@ -1171,6 +1284,8 @@ while true; do
       agent_args+=(-c "model_reasoning_effort=\"$effort\"")
     fi
     [ -z "$model" ] || agent_args+=(--model "$model")
+    mapfile -t agentmem_args < <(agentmem_codex_args)
+    agent_args+=("${agentmem_args[@]}")
     agent_args+=("\$$skill_name — Read $skill_file and execute exactly one unattended turn. Follow its state update and git commit procedure. If blocked, record the reason in $MS_DIR/BLOCKED.md and commit the blocked state.")
   elif [ "$ENGINE" = opencode ]; then
     # 無人ターンは承認プロンプトに応答できないので、明示的に deny されていない権限を自動承認する
@@ -1186,6 +1301,10 @@ while true; do
 
     agent_args=(-p "$cmd" --permission-mode "$PERMISSION_MODE")
     [ -z "$model" ] || agent_args+=(--model "$model")
+    # achat: 同じ名前のサーバーが .mcp.json にあっても --mcp-config の方が使われる（実機確認済み）
+    if [ -n "$(agentmem_pairs)" ]; then
+      agentmem_mcp_json > "$logdir/agentmem-mcp.json" && agent_args+=(--mcp-config "$logdir/agentmem-mcp.json")
+    fi
     if [ "${GSD_LITE_CLAUDE_STREAM:-on}" != off ]; then
       agent_args+=(--output-format stream-json --verbose)
       rawlog="${log%.log}.jsonl"
@@ -1197,6 +1316,15 @@ while true; do
   if [ "$ENGINE" = claude ] && [ "${#TOKEN_VARS[@]}" -gt 0 ]; then
     token_var=$(next_token_var)
   fi
+  # OpenCode には achat を環境変数の設定で渡す。利用者が OPENCODE_CONFIG_CONTENT を使っていれば重ねる
+  opencode_config=
+  if [ "$ENGINE" = opencode ] && [ -n "$(agentmem_pairs)" ]; then
+    opencode_base=${OPENCODE_CONFIG_CONTENT:-}
+    [ -n "$opencode_base" ] || opencode_base='{}'
+    opencode_config=$(jq -cn --argjson a "$opencode_base" --argjson b "$(agentmem_opencode_config)" '$a * $b' 2>/dev/null) ||
+      { opencode_config=; echo "gsd-lite: WARN OPENCODE_CONFIG_CONTENT is not valid JSON — this turn runs without achat" >&2; }
+  fi
+  turn_agentmem=$(agentmem_names)
   echo "gsd-lite: turn $((turn_before + 1)) [$ENGINE/$phase] $cmd (attempt $((retry + 1)))${token_var:+ (token: $token_var)}"
   head_before=$(git rev-parse HEAD 2>/dev/null || echo "")
   target_head_before=""
@@ -1207,6 +1335,8 @@ while true; do
   # timeout でハングを検知し（超過は kill）、進捗なし→リトライ経路に乗せる
   (
     [ -z "$token_var" ] || export CLAUDE_CODE_OAUTH_TOKEN="${!token_var}"
+    [ -z "$opencode_config" ] || export OPENCODE_CONFIG_CONTENT="$opencode_config"
+    export GSD_LITE_UNATTENDED=1
     exec env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
       timeout -k 30 "${GSD_LITE_TURN_TIMEOUT:-3600}" \
       "$AGENT_BIN" "${agent_args[@]}" \

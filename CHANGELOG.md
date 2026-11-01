@@ -7,6 +7,24 @@ gsd-lite の利用者から見た変更を、新しい順に記録する。バ�
 - 反映: ループ本体（`bin/gsd-lite-loop.sh`）の変更は `install.sh` で入れ直し、ループを再起動したときから効く。
   スキル・雛形の変更は、既存プロジェクトでは `gsd-lite-init` のスキル更新モードで取り込む
 
+## 2026-11-01
+
+### 追加
+- **achat（agentmem MCP）との連携**（任意）。state の `agentmem`（`url` / `project` / `shared_project`）と環境変数
+  `AGENTMEM_TOKEN` があるターンにだけ、ループが MCP サーバー `agentmem`（対象リポジトリの project）と `agentmem-gsd`
+  （gsd-lite を使う全リポジトリで共有する project）をエンジンに渡す。Claude は `--mcp-config`、Codex は `-c mcp_servers.*`
+  （承認なしで呼べるよう `default_tools_approval_mode="approve"`）、OpenCode は `OPENCODE_CONFIG_CONTENT`。トークンの値は
+  どの設定にも書かない（Issue #2）
+- スキルが achat を使う: discuss は過去の知見を引いて質問の材料にし、採った決まりを記憶に残す。research は調査対象
+  `agentmem`（RESEARCH.md の「achat の過去知見」）。impl / verify は作業記録（`record_task`）。reflect はマイルストーンの
+  作業記録、AGENTS.md 候補の記憶、ほかのリポジトリでも効く学びを共有側の掲示板へ（3 件まで。近いスレッドがあれば追記）。
+  どれも `--where` の `agentmem=on` のときだけで、achat が使えなくても BLOCKED にしない（Issue #2）
+- `--check` / `--status` の `agentmem` 行。`--check` と起動時は、値の形の誤りで止め、トークン無し・achat に届かない
+  （`/healthz`）・achat のフックが無人ターンでも動く形のときは WARN だけ出す（Issue #2）
+- ターンの環境に `GSD_LITE_UNATTENDED=1`（無人ターンでだけ止めたいフックの目印）。`--where` の `agentmem=` /
+  `agentmem_servers=`、`turns.jsonl` の `agentmem`（Issue #2）
+- allowlist の雛形に `mcp__agentmem` / `mcp__agentmem-gsd`（Issue #2）
+
 ## 2026-10-23
 
 ### 追加

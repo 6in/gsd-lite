@@ -50,6 +50,18 @@
 > `permission_denials` は区間ごとの値なので全区間を合計・連結し、`segments` に区間数を残す。BLOCKED で止まったとき
 > （このプロセスのターンで BLOCKED になった場合と、ループ開始後の前提エラー）に `hooks/on-blocked.sh` と
 > `GSD_LITE_ON_BLOCKED` を呼ぶ。ループ開始後の前提エラーも on-exit を通して終える（§7）。
+> achat 追補（2026-11-01、Issue #2）: 学びをリポジトリ・マシンをまたいで共有するため、achat（agentmem MCP。作業の記録・
+> 記憶・掲示板）を任意でつなぐ。state の `agentmem`（`url` / `project` / `shared_project`）と環境変数 `AGENTMEM_TOKEN` が
+> あるターンにだけ、ループが MCP サーバー `agentmem`（対象リポジトリの project）と `agentmem-gsd`（gsd-lite を使う全リポジトリで
+> 共有する project）をエンジンに渡す（Claude: `--mcp-config` / Codex: `-c mcp_servers.*` に `default_tools_approval_mode="approve"` /
+> OpenCode: `OPENCODE_CONFIG_CONTENT`）。achat の掲示板は project の中でしか検索できないので、gsd-lite 自体の学びは共有側に書く。
+> トークンの値はどの設定にも書かない。値の形の誤りは終了コード 6、トークン無し・届かない（`/healthz`）・achat のフックが無人ターンでも
+> 動く形は WARN だけ（ループは achat なしで進む）。ターンの環境に `GSD_LITE_UNATTENDED=1` を足し、`--where` に `agentmem=on|off` と
+> `agentmem_servers=` を、`turns.jsonl` に `agentmem` を出す。スキルは `agentmem=on` のときだけ使う: discuss は過去の知見を引いて
+> 質問の材料にし、採った決まりを `remember`。research は調査対象 `agentmem`。impl / verify は `record_task`。reflect はマイルストーンの
+> `record_task`、AGENTS.md 候補の `remember`、ほかのリポジトリでも効く学びを共有側に `create_thread`（3 件まで、近いスレッドがあれば
+> `add_supplement`、`force` は使わない）。無人ターンは `rate_thread` を使わない（同じ人の評価は verified の判定に効かない）。
+> 正本は git のままで、achat は横断検索と共有の層（README「achat（agentmem MCP）と組み合わせる」）。
 > 詳細なインストール・移行・権限設定は [README の Codex 手順](../README.md#codex-で使う) /
 > [OpenCode 手順](../README.md#opencode-で使う) を参照。
 
@@ -222,6 +234,7 @@ gsd-lite/
     "targets": ["similar_oss", "official_docs", "local_projects"],
     "local_search_paths": ["~/workspaces"]
   },
+  "agentmem": { "url": "", "project": "", "shared_project": "" },
   "turn": 12,
   "max_turns": 60,
   "retry_max": 2,
@@ -246,7 +259,10 @@ gsd-lite/
 - `research.targets`: discuss の最終ラウンドで AUQ により選択（デフォルトは 3 つすべて）。
   `similar_oss`（類似 OSS・先行事例の Web 調査）/ `official_docs`（採用技術の公式
   ドキュメント・ベストプラクティス）/ `local_projects`（`local_search_paths` 配下の
-  自分の過去プロジェクトから同型実装を探す）
+  自分の過去プロジェクトから同型実装を探す）/ `agentmem`（achat の掲示板・記憶・過去の作業記録。
+  `agentmem` が接続されているときだけ選べる）
+- `agentmem`: achat（agentmem MCP）の接続先。`url` は MCP の URL（`/mcp` まで）、`project` は対象リポジトリの
+  achat project、`shared_project` は gsd-lite を使う全リポジトリで共有する project。`url` が空なら使わない
 - `next_command`: ループが実行する唯一の値。`/` で始まるスラッシュコマンド文字列のみ実行し、
   それ以外は番兵値として停止する:
   - `DISCUSS`: 対話フェーズが未完了（ループは「先に対話セッションで /gsd-lite-discuss を
@@ -389,6 +405,8 @@ discuss の決定を**事実で補強する**無人フェーズ。要件を書�
      落とし穴を調査し、plan の技術前提を固める
    - `local_projects`: `research.local_search_paths` 配下の自分の過去プロジェクト
      から同型の実装・雛形を探す
+   - `agentmem`: achat の掲示板（`agentmem` と `agentmem-gsd` の両方）・記憶・過去の作業記録を引く。
+     他の人・他のマシンの知見まで届く
 2. `RESEARCH.md` に産出: 参考実装（パス/URL 付き）/ 盗める設計 / 使えるライブラリ /
    落とし穴と回避策 / 要件への影響（受け入れ基準に足すべき観点があれば提案として記載）
 3. **重大発見の扱い**: discuss の決定を覆しうる発見（例: 要件をほぼ満たす既存 OSS）は
@@ -598,7 +616,9 @@ done
 - 無人ターンでは MCP ツールの承認プロンプトに応答できない。Codex 側で
   `approval_mode = "approve"` を要求する MCP ツール（書き込み系）は
   `approval_policy=never` により常に拒否されるので、無人実行に使う MCP は
-  承認不要に設定しておく（gsd-lite の範囲外だが典型的な無進捗要因）
+  承認不要に設定しておく（gsd-lite の範囲外だが典型的な無進捗要因）。ループが渡す achat の 2 つのサーバーには
+  `default_tools_approval_mode="approve"` を付ける（付けないと「MCP tool call requires approval, but approval policy is never」
+  で全部拒否されることを実機で確認）。Claude は allowlist の `mcp__agentmem` / `mcp__agentmem-gsd` が要る
 
 ## 9. ブロック・再開プロトコル
 
@@ -630,6 +650,7 @@ done
 | 14 | Codex 敵対的レビュー反映（2026-09-09） | **7 件の指摘をすべて修正**: state 更新→commit の順序統一 / リモート運用の base 汚染防止（verify の base 復帰 + discuss の base pull と MR 未マージ確認）/ allowlist に push・gh・glab 追加 / max_turns の実行前判定 / ターンの timeout / pid の原子的取得 / マイルストーン別ログ |
 | 15 | Codex 敵対的レビュー第 2 ラウンド反映（2026-09-09） | **回帰 2 件を含む 7 件を修正**: verify の base 復帰を撤回（復帰は次回 discuss 冒頭 0-a へ移動）/「信頼するのはコミット済み state のみ」原則（rc!=0 は HEAD から復元して判定）/ 排他を flock に置換 / retry を追跡対象外 logs/.retry へ分離 / discuss の遷移をコミットに内包 / init に既存プロジェクト更新モード / timeout・flock の依存チェック。テストはコミットする実 git スタブに刷新（27 assert） |
 | 16 | Codex 敵対的レビュー第 3 ラウンド反映（2026-09-09） | **5 件を修正**: 進捗判定を rc 非依存の「コミット済み state のみ」に強化（rc=0 の未コミット DONE も不採用、毎ターン境界で state を HEAD に正規化、auto-BLOCKED もコミット）/ verify は push 成否を確認し失敗なら BLOCKED を追記コミット（push 中 kill の残留リスクは WARN で許容と明記）/ discuss は checkout 前に進行中チェック / フック・ターンにロック FD (9) を継承させない / 再開手順に「コミットしてから再起動」を必須化。テスト 30 assert |
+| 17 | achat（agentmem MCP）連携（2026-11-01、Issue #2） | **任意の層として 3 エンジンに渡す**: 接続はリポジトリの `.mcp.json` ではなくループがターンごとに渡す（gsd-control で対象ごとに project を変えるため。`--mcp-config` は同名の `.mcp.json` より優先されることを実機で確認）。project は対象用と共有用の 2 本（掲示板は project の中でしか検索できないため）。achat が使えなくても止めない。無人ターンは `rate_thread` を使わない |
 
 ## 11. 利用手順（ユーザー視点のウォークスルー）
 

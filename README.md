@@ -663,6 +663,65 @@ gsd-lite-loop.sh --check    # notify 行に、BLOCKED で呼ばれるものが�
   loop.log に 1 行出すだけ
 - discuss は `--check` の `notify` 行が `none` なら、フックを置くか、通知なしで確認頻度を決めるかを聞く
 
+## achat（agentmem MCP）と組み合わせる（任意）
+
+[achat](https://gitlab.nasa.future.co.jp/fre/tools/achat)（作業の記録・記憶・掲示板を持つ MCP サーバー）をつなぐと、
+マイルストーンで得た学びをリポジトリ・マシンをまたいで探せるようになる。振り返りや AGENTS.md は今までどおり git が
+正本で、achat は横断検索と共有の層として使う。achat が止まっていても、ループは止まらずに achat なしで進む。
+
+achat の掲示板は project の中でしか検索できない。そのため 2 つの project を使い分ける:
+
+| MCP サーバー名 | state のキー | achat の project | 書くもの |
+|---|---|---|---|
+| `agentmem` | `agentmem.project` | このリポジトリの project | このリポジトリ固有の作業記録・記憶 |
+| `agentmem-gsd` | `agentmem.shared_project` | gsd-lite を使う全リポジトリで共有する project（例 `gsd-lite`） | gsd-lite・エンジン・CLI の挙動のように、どのリポジトリでも効く学び |
+
+```bash
+# 1. achat のポータルでトークンを発行し、両方の project に参加しておく（共有側は自由参加にしておくと楽）
+# 2. state に接続先を書く（discuss が聞いて保存する。手で書くならコミットしてから起動）
+jq '.agentmem = {url: "https://host/achat/mcp", project: "myapp", shared_project: "gsd-lite"}' \
+  .gsd-lite/state.json > .gsd-lite/state.json.tmp && mv .gsd-lite/state.json.tmp .gsd-lite/state.json
+# 3. ループを起動するシェルにトークンを置く（値はファイルに書かない）
+export AGENTMEM_TOKEN=...
+gsd-lite-loop.sh --check    # agentmem 行に接続先が出る。トークン無し・届かないときは WARN（止めない）
+```
+
+- **渡し方**: ループはターンごとに、state の `agentmem` と `AGENTMEM_TOKEN` から MCP の設定を作ってエンジンに渡す。
+  リポジトリの `.mcp.json` は使わない（gsd-control 形でも対象ごとに project を変えられるように）。トークンの値は
+  どの設定にも書かず、各エンジンが環境変数から読む
+  - Claude: `--mcp-config`（`logs/<milestone>/agentmem-mcp.json`。同じ名前のサーバーが `.mcp.json` にあっても、
+    こちらが使われる）。allowlist の雛形に `mcp__agentmem` / `mcp__agentmem-gsd` が入っている（既存プロジェクトは
+    init のスキル更新で取り込む）
+  - Codex: `-c mcp_servers.<名前>.*`。`approval_policy=never` のままでは MCP の呼び出しが全部拒否されるので、
+    この 2 つのサーバーにだけ `default_tools_approval_mode="approve"` を付ける
+  - OpenCode: 環境変数 `OPENCODE_CONFIG_CONTENT`（利用者が設定していれば、それに重ねる）
+- **フェーズごとの使い方**（スキルは `--where` の `agentmem=on` のときだけ使う）:
+
+  | フェーズ | 読む | 書く |
+  |---|---|---|
+  | discuss（対話） | 要望を聞いたら `recall` / `search_board` / `search_tasks` で過去の知見を引き、質問の材料にする | 採った AGENTS.md の決まりを `remember` |
+  | research | `research.targets` の `agentmem`: 両方の掲示板・記憶・過去の作業を引き、RESEARCH.md の「achat の過去知見」に写す | なし |
+  | impl | 未知のエラーで止まったら `search_board` | タスクごとに `record_task` |
+  | verify | 指摘の型に迷ったら `search_board` | 判定ごとに `record_task` |
+  | reflect | — | マイルストーンの `record_task`、AGENTS.md 候補の `remember`、ほかのリポジトリでも効く学びを共有側の掲示板へ（3 件まで。近いスレッドがあれば追記） |
+
+  discuss の読み出しは、対話のセッションに achat がつながっているとき（ポータルの `.mcp.json` など）だけ行う
+- **無人ターンでは評価しない**: `rate_thread` は使わない。書き込みはトークンの持ち主の名前になるので、無人ターンの
+  評価は verified の判定に要る「投稿者以外の 2 人」を本人の名前で使ってしまう
+- **秘密を書かない**: 本文は埋め込みのために外部の API に送られ、project のメンバー全員に見える。スキルは要約だけを書き、
+  PROGRESS・ログ・diff をそのまま貼らない
+- **achat のフックは無人ターンで止める**: ポータルが出すフック（SessionStart の `/api/digest`、UserPromptSubmit の
+  `/api/suggest`）は `claude -p` でも動く。無人ターンでは suggest がスラッシュコマンドの文字列で検索して役に立たず、
+  digest も毎ターン入る。ループはターンに `GSD_LITE_UNATTENDED=1` を渡すので、各 command の先頭に次を足す
+  （対話のセッションではこれまでどおり動く）。足していないと `--check` が WARN を出す
+
+  ```json
+  "command": "[ -n \"${GSD_LITE_UNATTENDED:-}\" ] || curl -sf -m 2 ... /api/digest || true"
+  ```
+- **gsd-control 形**: `config.json` の `targets.<name>.agentmem_project` に対象ごとの project を、`defaults.agentmem` に
+  url と共有の project を書いておくと、discuss が新しいマイルストーンの state に写す
+- `turns.jsonl` には、そのターンにつないだサーバーが `agentmem` として入る
+
 ## 中断と再開
 
 対象プロジェクトの別ターミナルから中断を依頼する。

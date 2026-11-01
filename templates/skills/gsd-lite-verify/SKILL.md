@@ -18,6 +18,8 @@ milestone_dir=.gsd-lite/milestones/<slug>   # 以下「$MS」と書く場所。i
 state=.gsd-lite/milestones/<slug>/state.json
 target=work/<name>      # 以下「$TARGET」と書く場所。in-repo 形では .
 slug=<slug>
+agentmem=on             # on | off（achat を使えるか。下の「achat」の節）
+agentmem_servers=agentmem agentmem-gsd   # このターンにつながっている achat の MCP サーバー
 ```
 
 **以降のコマンドでは、この出力の値をそのままリテラルで書く**（例: `cat .gsd-lite/milestones/todo-mvp/PLAN.md`、
@@ -38,6 +40,37 @@ slug=<slug>
   （`/tmp` への書き込みは allowlist 外で権限拒否になる。logs/ は gitignore 済み）
 - 環境メモ: lean-ctx 等の MCP ツールが未接続でも通常のツールで進めてよい。未接続であることは
   PROGRESS の「想定外」に書かなくてよい（毎ターン同じ行が並ぶだけで振り返りの材料にならない）
+- achat（agentmem MCP）: `--where` の `agentmem=on` のときだけ、下の「achat」の節に従って使う。`off` なら
+  achat には触れず、そのことを PROGRESS に書かない。`on` でもツールが見えない・エラーになる（AM001 = トークン、
+  接続できないなど）なら、そのターンは achat なしで進める。**achat が原因で BLOCKED にしない**
+
+## achat（`agentmem=on` のときだけ）
+
+achat は作業の記録・記憶・掲示板を持つ MCP サーバー。ループがこのターンにつないでいる（`agentmem_servers=` の名前だけ）:
+
+| サーバー | achat の project | 書くもの |
+|---|---|---|
+| `agentmem` | このリポジトリの project | このリポジトリ固有の作業記録・記憶 |
+| `agentmem-gsd` | gsd-lite を使う全リポジトリで共有 | gsd-lite・エンジン・CLI の挙動のように、どのリポジトリでも効く学び |
+
+掲示板と作業記録は project の中でしか検索できないので、読むときは両方を引く。正本は git（PROGRESS / RESEARCH /
+VERIFICATION / reflect / AGENTS.md）で、achat は横断検索と共有の層。achat にだけ書いて済ませない。
+
+- **文脈**: `set_context` は、repo / branch が要る操作（`remember` の repo・branch、`scope=repo` の検索・投稿）の前に、
+  そのサーバーで 1 回だけ呼ぶ。`repo_url` は `git -C $TARGET remote get-url origin` の出力（origin が無ければ repo
+  範囲の操作はしない）、`base_path` は `$TARGET` の絶対パス、`branch` は state の `branch.name`、`client_session_id` は
+  `gsd-lite/<slug>/<phase>/turn-<N>`（N はこのターンで +1 した後の turn）
+- **本文は要約だけ**: PROGRESS・ログ・diff・コマンドの出力をそのまま貼らない。トークン・パスワード・顧客名・個人名を
+  書かない（本文は埋め込みのために外部の API に送られ、project のメンバー全員に見える）
+- **エラー**: `AM011` は、エラーに出た項目名と制約を読んで 1 回だけ直して再試行する。だめならそのまま先へ進む
+- **`rate_thread` は使わない**（無人ターンの評価は、verified の判定に要る「投稿者以外の 2 人」を本人の名前で使ってしまう）
+- **このフェーズ**:
+  - 指摘がよくある型か、直し方に迷ったら `search_board` を引く（両方のサーバー）。使ったスレッドは VERIFICATION.md に
+    thread_id と題名を書く（評価はしない）
+  - 判定を VERIFICATION.md に書いた後（合格・差し戻しのどちらでも）、`agentmem` の `record_task` を 1 回呼ぶ:
+    title `<slug> verify round <R>: 合格` または `<slug> verify round <R>: 差し戻し（指摘 K 件）`（R = `verify_round` + 1）、
+    outcome は合格なら `success`・差し戻しなら `partial`、summary は指摘の型と残留リスクの要約（コードやログは貼らない）、
+    tags `["gsd-lite", "<slug>", "verify"]`、`context` は上の「文脈」と同じ値
 
 ## 手順
 

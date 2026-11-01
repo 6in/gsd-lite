@@ -875,10 +875,10 @@ echo "== Test 34: --where は作業場所を key=value で出す（in-repo / con
 make_project "$TESTROOT/w34"
 out=$("$LOOP" --where)
 assert_eq "where exits 0" "$?" "0"
-assert_eq "where in-repo" "$out" "$(printf 'mode=repo\nmilestone_dir=.gsd-lite\nstate=.gsd-lite/state.json\ntarget=.\nslug=toy')"
+assert_eq "where in-repo" "$out" "$(printf 'mode=repo\nmilestone_dir=.gsd-lite\nstate=.gsd-lite/state.json\ntarget=.\nslug=toy\nagentmem=off\nagentmem_servers=')"
 make_control_project "$TESTROOT/w34c"
 out=$("$LOOP" --where)
-assert_eq "where control" "$out" "$(printf 'mode=control\nmilestone_dir=.gsd-lite/milestones/toy\nstate=.gsd-lite/milestones/toy/state.json\ntarget=work/tgt\nslug=toy')"
+assert_eq "where control" "$out" "$(printf 'mode=control\nmilestone_dir=.gsd-lite/milestones/toy\nstate=.gsd-lite/milestones/toy/state.json\ntarget=work/tgt\nslug=toy\nagentmem=off\nagentmem_servers=')"
 git checkout -q main
 "$LOOP" --where > "$TESTROOT/where.log" 2>&1
 assert_eq "where off a milestone branch fails" "$?" "6"
@@ -1463,6 +1463,124 @@ grep -q 'WARN GSD_LITE_ON_BLOCKED is not an executable file' "$TESTROOT/check.lo
 out=$(cd "$TESTROOT/b49agent" && "$REPO_DIR/templates/hooks/on-blocked.sh" .gsd-lite/BLOCKED.md "理由" 2 2>&1)
 assert_eq "sample hook exits 0" "$?" "0"
 echo "$out" | grep -q 'gsd-lite: b49agent が止まった（exit 2） — 理由' && ok "sample hook prints a line" || ng "sample hook output ($out)"
+
+echo "== Test 50: achat（agentmem MCP）をターンごとにエンジンへ渡す（任意。止めない） =="
+# healthz を返す小さな HTTP サーバー（URL_PREFIX 配下を模して /x/healthz）
+mkdir -p "$TESTROOT/achat-www/x" && echo ok > "$TESTROOT/achat-www/x/healthz"
+AM_PORT=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+python3 -I -m http.server "$AM_PORT" --bind 127.0.0.1 --directory "$TESTROOT/achat-www" >/dev/null 2>&1 &
+AM_PID=$!
+for _ in $(seq 50); do curl -sf -m 1 -o /dev/null "http://127.0.0.1:$AM_PORT/x/healthz" && break; sleep 0.1; done
+AM_URL="http://127.0.0.1:$AM_PORT/x/mcp"
+AM_SET=".agentmem = {url: \"$AM_URL\", project: \"repo-proj\", shared_project: \"gsd-lite\"}"
+cat > "$TESTROOT/bin/claude-agentmem" <<'EOF'
+#!/usr/bin/env bash
+echo "unattended=${GSD_LITE_UNATTENDED:-unset}" >> .gsd-lite/agentmem-seen.log
+prev=
+for a in "$@"; do
+  [ "$prev" = --mcp-config ] && cp "$a" .gsd-lite/agentmem-mcp-seen.json
+  prev=$a
+done
+exec "$(dirname "$0")/claude-happy" "$@"
+EOF
+chmod +x "$TESTROOT/bin/claude-agentmem"
+make_project "$TESTROOT/t50off"
+printf '.gsd-lite/agentmem-seen.log\n.gsd-lite/agentmem-mcp-seen.json\n' >> .gitignore && git add .gitignore && git commit -qm ignore
+"$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "no agentmem passes --check" "$?" "0"
+grep -q 'agentmem  : off (state.agentmem.url empty)' "$TESTROOT/check.log" && ok "check shows agentmem off" || ng "agentmem off line"
+AGENTMEM_TOKEN=secret-am "$LOOP" --where | grep -qx 'agentmem=off' && ok "where: agentmem=off without url" || ng "where agentmem off"
+commit_state '.max_turns=1'
+AGENTMEM_TOKEN=secret-am GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-agentmem" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+[ -f .gsd-lite/agentmem-mcp-seen.json ] && ng "no --mcp-config without agentmem.url" || ok "no --mcp-config without agentmem.url"
+assert_eq "turns are marked unattended" "$(cat .gsd-lite/agentmem-seen.log)" "unattended=1"
+assert_eq "turns.jsonl has no agentmem without it" "$(jq -r 'has("agentmem")' .gsd-lite/logs/toy/turns.jsonl)" "false"
+
+make_project "$TESTROOT/t50"
+printf '.gsd-lite/agentmem-seen.log\n.gsd-lite/agentmem-mcp-seen.json\n' >> .gitignore && git add .gitignore && git commit -qm ignore
+commit_state "$AM_SET"
+# トークンが無ければ止めずに WARN し、MCP は渡さない
+env -u AGENTMEM_TOKEN "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "missing AGENTMEM_TOKEN does not fail --check" "$?" "0"
+grep -q 'WARN AGENTMEM_TOKEN is not set' "$TESTROOT/check.log" && ok "check warns about AGENTMEM_TOKEN" || ng "AGENTMEM_TOKEN WARN"
+grep -q 'agentmem  : NOT connected — AGENTMEM_TOKEN unset' "$TESTROOT/check.log" && ok "check shows not connected" || ng "not connected line"
+env -u AGENTMEM_TOKEN "$LOOP" --where | grep -qx 'agentmem=off' && ok "where: agentmem=off without token" || ng "where off without token"
+# トークンがあれば両方のサーバーを渡す
+AGENTMEM_TOKEN=secret-am "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "agentmem passes --check" "$?" "0"
+grep -q 'WARN' "$TESTROOT/check.log" && ng "reachable achat should not warn ($(grep WARN "$TESTROOT/check.log"))" || ok "reachable achat: no WARN"
+grep -q "agentmem  : $AM_URL — agentmem repo-proj, agentmem-gsd gsd-lite" "$TESTROOT/check.log" && ok "check shows both servers" || ng "agentmem line ($(grep agentmem "$TESTROOT/check.log"))"
+out=$(AGENTMEM_TOKEN=secret-am "$LOOP" --where)
+echo "$out" | grep -qx 'agentmem=on' && ok "where: agentmem=on" || ng "where agentmem on"
+echo "$out" | grep -qx 'agentmem_servers=agentmem agentmem-gsd' && ok "where lists servers" || ng "where servers"
+AGENTMEM_TOKEN=secret-am GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-agentmem" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "agentmem cycle DONE" "$?" "0"
+assert_eq "--mcp-config servers" "$(jq -r '.mcpServers | keys | join(",")' .gsd-lite/agentmem-mcp-seen.json)" "agentmem,agentmem-gsd"
+assert_eq "--mcp-config url" "$(jq -r '.mcpServers.agentmem.url' .gsd-lite/agentmem-mcp-seen.json)" "$AM_URL"
+assert_eq "--mcp-config project header" "$(jq -r '.mcpServers["agentmem-gsd"].headers["X-Project-Id"]' .gsd-lite/agentmem-mcp-seen.json)" "gsd-lite"
+assert_eq "--mcp-config keeps the token as a reference" "$(jq -r '.mcpServers.agentmem.headers.Authorization' .gsd-lite/agentmem-mcp-seen.json)" 'Bearer ${AGENTMEM_TOKEN}'
+grep -rq 'secret-am' .gsd-lite/logs "$TESTROOT/loop-out.log" && ng "token value leaked" || ok "token value is never written"
+assert_eq "turns.jsonl records the servers" "$(jq -c '.agentmem' .gsd-lite/logs/toy/turns.jsonl | sort -u)" '["agentmem","agentmem-gsd"]'
+assert_eq "agentmem clean worktree" "$(git status --porcelain | wc -l)" "0"
+# 共有側だけでも使える
+commit_state '.agentmem.project = ""'
+AGENTMEM_TOKEN=secret-am "$LOOP" --where | grep -qx 'agentmem_servers=agentmem-gsd' && ok "shared project alone" || ng "shared project alone"
+# 届かない achat は WARN だけ
+commit_state ".agentmem.url = \"http://127.0.0.1:1/mcp\""
+AGENTMEM_TOKEN=secret-am "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "unreachable achat does not fail --check" "$?" "0"
+grep -q 'WARN achat is unreachable (http://127.0.0.1:1/healthz)' "$TESTROOT/check.log" && ok "check warns when achat is unreachable" || ng "unreachable WARN"
+# 打ち間違いは止める
+for bad in '.agentmem.url = "http://127.0.0.1:1/x"' '.agentmem.url = "http://user@h/mcp"' '.agentmem.url = "" | .agentmem.project = "p1"' '.agentmem.project = "Bad Slug"'; do
+  commit_state "$AM_SET | $bad"
+  AGENTMEM_TOKEN=secret-am "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+  assert_eq "rejected: $bad" "$?" "6"
+done
+# achat のフックは無人ターンでは止めてもらう
+commit_state "$AM_SET"
+printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"curl -sf -m 2 http://h/api/digest || true"}]}]}}\n' > .claude/settings.json
+AGENTMEM_TOKEN=secret-am "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+grep -q "WARN .claude/settings.json runs achat's hooks" "$TESTROOT/check.log" && ok "check warns about achat hooks" || ng "hook WARN"
+printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"[ -n \\"${GSD_LITE_UNATTENDED:-}\\" ] || curl -sf -m 2 http://h/api/digest || true"}]}]}}\n' > .claude/settings.json
+AGENTMEM_TOKEN=secret-am "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+grep -q "achat's hooks" "$TESTROOT/check.log" && ng "guarded hook should not warn" || ok "guarded hook: no WARN"
+rm .claude/settings.json
+
+# Codex: -c で渡し、承認なしにする
+make_codex_project "$TESTROOT/t50codex"
+commit_state "$AM_SET | .max_turns=1"
+AGENTMEM_TOKEN=secret-am GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+for value in "mcp_servers.agentmem.url=\"$AM_URL\"" 'mcp_servers.agentmem.bearer_token_env_var="AGENTMEM_TOKEN"' \
+    'mcp_servers.agentmem.http_headers={"X-Project-Id"="repo-proj"}' 'mcp_servers.agentmem-gsd.http_headers={"X-Project-Id"="gsd-lite"}' \
+    'mcp_servers.agentmem-gsd.default_tools_approval_mode="approve"'; do
+  grep -Fxq -- "$value" .gsd-lite/stub-args.log && ok "Codex argv: $value" || ng "Codex argv: $value"
+done
+grep -q 'secret-am' .gsd-lite/stub-args.log && ng "token value in Codex argv" || ok "no token value in Codex argv"
+make_codex_project "$TESTROOT/t50codex-off"
+commit_state "$AM_SET | .max_turns=1"
+env -u AGENTMEM_TOKEN GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+grep -q 'mcp_servers' .gsd-lite/stub-args.log && ng "Codex gets achat without a token" || ok "Codex: no achat without a token"
+
+# OpenCode: OPENCODE_CONFIG_CONTENT に重ねる
+cat > "$TESTROOT/bin/opencode-agentmem" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-<unset>}" >> .gsd-lite/agentmem-seen.log
+exec "$(dirname "$0")/opencode-happy" "$@"
+EOF
+chmod +x "$TESTROOT/bin/opencode-agentmem"
+make_opencode_project "$TESTROOT/t50oc"
+printf '.gsd-lite/agentmem-seen.log\n' >> .gitignore && git add .gitignore && git commit -qm ignore
+commit_state "$AM_SET | .max_turns=1"
+OPENCODE_CONFIG_CONTENT='{"theme":"x"}' AGENTMEM_TOKEN=secret-am GSD_LITE_OPENCODE_BIN="$TESTROOT/bin/opencode-agentmem" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+seen=$(head -n 1 .gsd-lite/agentmem-seen.log)
+assert_eq "OpenCode keeps the user's config" "$(echo "$seen" | jq -r .theme)" "x"
+assert_eq "OpenCode remote servers" "$(echo "$seen" | jq -r '.mcp | to_entries | map("\(.key)=\(.value.type)") | join(",")')" "agentmem=remote,agentmem-gsd=remote"
+assert_eq "OpenCode token reference" "$(echo "$seen" | jq -r '.mcp.agentmem.headers.Authorization')" 'Bearer {env:AGENTMEM_TOKEN}'
+commit_state '.max_turns=2'
+OPENCODE_CONFIG_CONTENT='not json' AGENTMEM_TOKEN=secret-am GSD_LITE_OPENCODE_BIN="$TESTROOT/bin/opencode-agentmem" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "invalid OPENCODE_CONFIG_CONTENT is left as is" "$(sed -n 2p .gsd-lite/agentmem-seen.log)" "not json"
+grep -q 'WARN OPENCODE_CONFIG_CONTENT is not valid JSON' "$TESTROOT/loop-out.log" && ok "warns about invalid OPENCODE_CONFIG_CONTENT" || ng "invalid OPENCODE_CONFIG_CONTENT WARN"
+kill "$AM_PID" 2>/dev/null
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

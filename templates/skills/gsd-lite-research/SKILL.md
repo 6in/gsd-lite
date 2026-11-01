@@ -19,6 +19,8 @@ milestone_dir=.gsd-lite/milestones/<slug>   # 以下「$MS」と書く場所。i
 state=.gsd-lite/milestones/<slug>/state.json
 target=work/<name>      # 以下「$TARGET」と書く場所。in-repo 形では .
 slug=<slug>
+agentmem=on             # on | off（achat を使えるか。下の「achat」の節）
+agentmem_servers=agentmem agentmem-gsd   # このターンにつながっている achat の MCP サーバー
 ```
 
 **以降のコマンドでは、この出力の値をそのままリテラルで書く**（例: `cat .gsd-lite/milestones/todo-mvp/PLAN.md`、
@@ -39,6 +41,31 @@ slug=<slug>
   （`/tmp` への書き込みは allowlist 外で権限拒否になる。logs/ は gitignore 済み）
 - 環境メモ: lean-ctx 等の MCP ツールが未接続でも通常のツールで進めてよい。未接続であることは
   PROGRESS の「想定外」に書かなくてよい（毎ターン同じ行が並ぶだけで振り返りの材料にならない）
+- achat（agentmem MCP）: `--where` の `agentmem=on` のときだけ、下の「achat」の節に従って使う。`off` なら
+  achat には触れず、そのことを PROGRESS に書かない。`on` でもツールが見えない・エラーになる（AM001 = トークン、
+  接続できないなど）なら、そのターンは achat なしで進める。**achat が原因で BLOCKED にしない**
+
+## achat（`agentmem=on` のときだけ）
+
+achat は作業の記録・記憶・掲示板を持つ MCP サーバー。ループがこのターンにつないでいる（`agentmem_servers=` の名前だけ）:
+
+| サーバー | achat の project | 書くもの |
+|---|---|---|
+| `agentmem` | このリポジトリの project | このリポジトリ固有の作業記録・記憶 |
+| `agentmem-gsd` | gsd-lite を使う全リポジトリで共有 | gsd-lite・エンジン・CLI の挙動のように、どのリポジトリでも効く学び |
+
+掲示板と作業記録は project の中でしか検索できないので、読むときは両方を引く。正本は git（PROGRESS / RESEARCH /
+VERIFICATION / reflect / AGENTS.md）で、achat は横断検索と共有の層。achat にだけ書いて済ませない。
+
+- **文脈**: `set_context` は、repo / branch が要る操作（`remember` の repo・branch、`scope=repo` の検索・投稿）の前に、
+  そのサーバーで 1 回だけ呼ぶ。`repo_url` は `git -C $TARGET remote get-url origin` の出力（origin が無ければ repo
+  範囲の操作はしない）、`base_path` は `$TARGET` の絶対パス、`branch` は state の `branch.name`、`client_session_id` は
+  `gsd-lite/<slug>/<phase>/turn-<N>`（N はこのターンで +1 した後の turn）
+- **本文は要約だけ**: PROGRESS・ログ・diff・コマンドの出力をそのまま貼らない。トークン・パスワード・顧客名・個人名を
+  書かない（本文は埋め込みのために外部の API に送られ、project のメンバー全員に見える）
+- **エラー**: `AM011` は、エラーに出た項目名と制約を読んで 1 回だけ直して再試行する。だめならそのまま先へ進む
+- **`rate_thread` は使わない**（無人ターンの評価は、verified の判定に要る「投稿者以外の 2 人」を本人の名前で使ってしまう）
+- **このフェーズ**: 読むだけで書かない。手順 2 の `agentmem` を参照
 
 ## 手順
 
@@ -51,6 +78,10 @@ slug=<slug>
      落とし穴を調査し、plan の技術前提を固める
    - `local_projects`: `research.local_search_paths` 配下の過去プロジェクトから
      同型の実装・雛形を探す（パス付きで記録）
+   - `agentmem`: achat の過去の知見（上の「achat」の節。`agentmem=off` なら調べず、RESEARCH.md に
+     「achat 未接続のため調べていない」と 1 行書く）。両方のサーバーで `search_board` を、主題・採用技術・懸念点を
+     クエリにして 2〜4 回引く。`agentmem` では `search_tasks`（scope `project`）と `recall` も引く。
+     `local_projects` と違い、他の人・他のマシンの作業まで届く
 3. `$MS/RESEARCH.md` に産出:
    - 参考実装（ローカルパス / URL 付き）
    - 盗める設計・使えるライブラリ
@@ -60,6 +91,9 @@ slug=<slug>
      エラー漏れ・権限）は意識して探す
    - 要件への影響（受け入れ基準に足すべき観点があれば**提案として**記載。
      REQUIREMENTS.md 本文は書き換えない）
+   - `agentmem` を調べたら「## achat の過去知見」: 使えるものだけを、thread_id / タスクの title 付きで要約し、
+     今回どう効くか（落とし穴なら上と同じく検証方法も）を書く。status が `obsolete` のものや、versions が今と違うものは
+     外すか、そう明記する
 4. **重大発見の扱い**: discuss の決定を覆しうる発見（例: 要件をほぼ満たす既存 OSS が
    あった）は、要旨と選択肢+推奨を `$MS/BLOCKED.md` に書いて BLOCKED で停止する
    （下記手順で `next_command: "BLOCKED"`）。「作るか使うか」は投資判断なので人間に戻す。
