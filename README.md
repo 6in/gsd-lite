@@ -172,6 +172,7 @@ Codex 用 init は `~/.agents/skills/`、雛形は `~/.codex/gsd-lite/templates/
 | `GSD_LITE_LIMIT_PATTERN` | 利用上限と見なすターンログの拡張正規表現（大文字小文字を区別しない） |
 | `GSD_LITE_CLAUDE_STREAM` | 既定: `on`。Claude のターンを stream-json で起動し、トークン量・コスト・権限拒否を `turns.jsonl` に記録する（イベント列は `turn-NNN-attemptN.jsonl`、最終メッセージは従来の `.log`）。`off` で従来の平文ログだけ |
 | `GSD_LITE_CLAUDE_TOKEN_VARS` | 任意。Claude のターンで使う `CLAUDE_CODE_OAUTH_TOKEN` を、列挙した環境変数名からターンごとに切り替える（下記） |
+| `GSD_LITE_PROVIDERS_DIR` | Claude の接続先プロファイルの置き場（既定: `${XDG_CONFIG_HOME:-~/.config}/gsd-lite/providers`。下記） |
 | `GSD_LITE_TOKEN_PICK` | `usage`（既定）/ `round-robin`。`usage` は利用枠の使用率が最も低いトークンを選ぶ（同率なら順番どおり）。`round-robin` は使用率を見ずに順番どおり |
 | `GSD_LITE_TOKEN_LIMITS` | トークンごとの利用枠を記録する共有ファイル（既定: `${XDG_STATE_HOME:-~/.local/state}/gsd-lite/token-limits.json`） |
 | `GSD_LITE_MEMORY_MAX` | 任意。ループ全体（ターンの CLI・テスト・ビルドを含む）のメモリ上限（例 `8G`、`75%`）。state の `limits.memory_max` より優先。`off` で付けない（下記） |
@@ -302,9 +303,12 @@ gsd-lite-loop.sh --status     # route 行で各フェーズのエンジンとモ
 |---|---|---|---|
 | Claude Code | `model.<phase>` | （なし） | `claude -p --model` に渡す名前。例 `claude-opus-5`、`claude-fable-5-1` |
 
-`<phase>` は `research` / `plan` / `impl` / `verify` / `reflect`。
 | Codex | `codex.model.<phase>` | `codex.reasoning_effort.<phase>`（`low` / `medium` / `high` / `xhigh` など） | `codex exec --model` に渡す名前。例 `gpt-5.5` |
 | OpenCode | `opencode.model.<phase>` | `opencode.variant.<phase>`、`opencode.agent.<phase>` | `provider/model`。例 `anthropic/claude-opus-5`（`opencode models` で一覧） |
+
+`<phase>` は `research` / `plan` / `impl` / `verify` / `reflect`。Claude のフェーズに接続先プロファイル
+（[Claude の接続先をフェーズごとに変える](#claude-の接続先をフェーズごとに変えるbedrock他社の互換-api任意)）を付けた場合は、
+プロファイルの `model` が `model.<phase>` より優先する。
 
 3 エンジンぶんを書いた例（実際に使われるのは `engine` / `phase_engines` で選ばれたエンジンの分だけ）:
 
@@ -389,6 +393,70 @@ gsd-lite-loop.sh --tokens   # 各トークンの残り（5 時間 / 7 日の使�
 - Codex / OpenCode のターンには影響しない。全フェーズが Codex / OpenCode なら無視される
 - 各トークンは自分のマシン用に取得したもので、値の管理・失効は利用者側の責任。
   `.gsd-lite/` や state.json にトークンを書かないこと
+- 接続先プロファイル（下記）を使うフェーズのターンでは使わない
+
+## Claude の接続先をフェーズごとに変える（Bedrock・他社の互換 API、任意）
+
+一部のフェーズの Claude Code だけを、Amazon Bedrock や他社の Anthropic 互換 API（Messages API 互換の
+エンドポイントや LLM ゲートウェイ）に向ける機能。例えば impl だけを別の接続先で動かせる。**未設定なら何も変わらない**。
+
+設定は 3 か所に分ける。秘密の値はリポジトリにもプロファイルにも書かない。
+
+| どこに | 何を | 例 |
+|---|---|---|
+| state.json の `claude.provider.<phase>`（コミットする） | 使うプロファイルの名前 | `"claude": { "provider": { "impl": "bedrock" } }` |
+| `~/.config/gsd-lite/providers/<名前>.json`（マシンごと） | 接続先の URL・リージョン・モデルの対応・キーを持つ変数の**名前** | サンプル: `templates/providers/` |
+| ループを起動するシェルの環境変数 | キーの値 | `export GSD_BEDROCK_API_KEY=...` |
+
+プロファイルの形:
+
+```json
+{
+  "env":        { "CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-east-1",
+                  "ANTHROPIC_DEFAULT_OPUS_MODEL": "us.anthropic.claude-opus-5-5" },
+  "secret_env": { "AWS_BEARER_TOKEN_BEDROCK": "GSD_BEDROCK_API_KEY" },
+  "model":      "us.anthropic.claude-opus-5-5",
+  "limit_pattern": "Request rejected \\(429\\)|ThrottlingException"
+}
+```
+
+- `env`: そのまま渡す環境変数。秘密に見える名前（`TOKEN` / `SECRET` / `PASSWORD` / `API_KEY` / `ACCESS_KEY` を含む）は
+  拒否されるので `secret_env` に書く
+- `secret_env`: 「渡す先の変数名 → 値を持つ環境変数の名前」。他社の互換 API なら `{"ANTHROPIC_AUTH_TOKEN": "MY_KEY_VAR"}`
+  Bedrock を EC2 のインスタンスロールや SSO（AWS の資格情報チェーン）で使うなら、`secret_env` は書かない（キーは要らない）
+- `model`: そのフェーズの `--model`。`state.model.<phase>` より優先する（state の既定は Anthropic API のモデル名のため）。
+  サブエージェントが `opus` / `sonnet` / `haiku` の別名で指定するモデルは `ANTHROPIC_DEFAULT_*_MODEL` で置き換える
+- `limit_pattern`: その接続先の利用上限・スロットリングの文言（拡張正規表現）。`GSD_LITE_LIMIT_PATTERN` に足して判定し、
+  当たったターンは無進捗のリトライではなく利用上限の待機（`GSD_LITE_LIMIT_WAIT`）として扱う
+
+```bash
+mkdir -p ~/.config/gsd-lite/providers
+cp ~/.claude/gsd-lite/templates/providers/bedrock.json ~/.config/gsd-lite/providers/   # リージョン・モデル ID を直す
+jq '.claude.provider.impl = "bedrock"' .gsd-lite/state.json > /tmp/s && mv /tmp/s .gsd-lite/state.json
+git add .gsd-lite/state.json && git commit -m "gsd-lite: impl を Bedrock で動かす"
+export GSD_BEDROCK_API_KEY='...'   # Bedrock API キー
+gsd-lite-loop.sh --check           # provider 行とプロファイル・変数の検証
+gsd-lite-loop.sh --status          # route 行に provider が出る
+```
+
+ループがそのターンでしていること:
+
+- 親環境から来た認証・接続先の変数（`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` /
+  `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_USE_BEDROCK` / `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_*_MODEL` など）を外してから、
+  プロファイルの値を export して `claude -p` を起動する。値は引数に載せない（`ps` に見えない）
+- `GSD_LITE_CLAUDE_TOKEN_VARS` によるトークンの切り替えと利用枠の記録はしない。`turns.jsonl` には `token_var` の代わりに
+  `provider` が入る
+- `--check` と起動時（と各ターンの前）に、プロファイルがあること・形・`secret_env` の変数が空でないことを確かめ、
+  だめなら終了コード 6。接続先も認証も決めていないプロファイルと、**`ANTHROPIC_BASE_URL` だけでキーを渡さない
+  プロファイル**も拒否する（Claude Code はそのとき保存されたサブスクリプションのログインをその URL へ送るため）
+
+注意:
+
+- `~/.claude/settings.json` の `env` に接続先の変数を書いていると、そちらが効いて混ざる。プロファイルを使うなら外す
+- `turns.jsonl` の `cost_usd` は Claude Code が Anthropic の単価で見積もった値で、接続先の実際の請求とは違う。
+  `rate_limit`（利用枠）は出ない
+- Bedrock では WebSearch ツールが使えない。research をプロファイルで動かすなら調査の手段に注意する
+- 置き場所は `GSD_LITE_PROVIDERS_DIR` で変えられる
 
 ## ループのメモリと CPU に上限を付ける（任意・Linux + systemd）
 

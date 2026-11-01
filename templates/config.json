@@ -6,6 +6,7 @@
     "phase_engines": {},
     "codex": { "model": {}, "reasoning_effort": {}, "sandbox": "" },
     "opencode": { "model": {}, "variant": {}, "agent": {} },
+    "claude": { "provider": {} },
     "subagents": "auto",
     "reflect": true,
     "limits": { "memory_max": "", "cpu_quota": "" },

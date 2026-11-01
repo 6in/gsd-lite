@@ -43,6 +43,11 @@
 #                              値はログ・出力に出さず、変数名だけを表示する。次に使う位置は logs/.token_index
 #                              利用上限に当たったターンは待たずに次のトークンでやり直し、全トークンが
 #                              続けて当たったときだけ GSD_LITE_LIMIT_WAIT 秒待つ
+#   GSD_LITE_PROVIDERS_DIR     Claude の接続先プロファイルの置き場（デフォルト
+#                              ${XDG_CONFIG_HOME:-~/.config}/gsd-lite/providers）。state.claude.provider.<phase> に
+#                              名前を書いたフェーズだけ、<名前>.json の env / secret_env（渡す先の変数名 → 値を持つ
+#                              変数名）でそのターンの Claude を Bedrock・他社の Anthropic 互換 API 等に向ける。
+#                              親環境の認証・接続先の変数は外し、トークンの切り替えも使わない（サンプルは templates/providers/）
 #   GSD_LITE_TOKEN_PICK        usage / round-robin（デフォルト usage）。usage なら利用枠の使用率
 #                              （5 時間と 7 日の大きい方。リセット済みの枠は 0）が最も低いトークンを選び、
 #                              同率なら従来の順番で回す。round-robin なら使用率を見ずに順番どおり
@@ -140,6 +145,13 @@ TOKEN_VARS=()                           # check_claude_tokens が GSD_LITE_CLAUD
 TOKEN_LIMITS="${GSD_LITE_TOKEN_LIMITS:-${XDG_STATE_HOME:-$HOME/.local/state}/gsd-lite/token-limits.json}"
 TOKEN_PICK="${GSD_LITE_TOKEN_PICK:-usage}"   # usage | round-robin
 LIMITED_TOKEN_VARS=""                   # 今回の上限の連続で当たった変数名（空白区切り。選択から外す）
+PROVIDERS_DIR="${GSD_LITE_PROVIDERS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gsd-lite/providers}"
+# 接続先プロファイルを使うターンでは、親環境から来たこれらを外してからプロファイルの値を入れる
+# （OAuth トークンが他社の URL に送られる・Bedrock が API キーの残りで起動を拒む・別の接続先の設定が混ざるのを防ぐ）
+PROVIDER_CLEAR_VARS="ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_MODEL
+  ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL
+  CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
+  ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_VERTEX_BASE_URL AWS_BEARER_TOKEN_BEDROCK"
 STOPFILE="$GSD_DIR/logs/.stop"    # 実行時情報。gitignore 済み logs/ に置く
 SCOPEFILE="$GSD_DIR/logs/.scope"  # 実行中の scope の unit 名と上限（--status 用の実行時情報）
 SYSTEMD_RUN="${GSD_LITE_SYSTEMD_RUN:-systemd-run}"   # テスト用スタブ差し込み
@@ -351,12 +363,12 @@ record_turn() { # 1 試行ぶんの計測値を logs/<milestone>/turns.jsonl に
     --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson duration "$((finished_epoch - started_epoch))" \
     --argjson rc "$rc" --argjson progressed "$progressed" --argjson commits "${commits:-0}" \
     --arg head_before "$head_before" --arg head_after "$head_after" --arg log "$log" \
-    --arg token_var "$token_var" --argjson target "$target_json" --argjson usage "$usage_json" \
+    --arg token_var "$token_var" --arg provider "$provider" --argjson target "$target_json" --argjson usage "$usage_json" \
     --arg agentmem "${turn_agentmem:-}" \
     '{turn:$turn, phase:$phase, engine:$engine, model:$model, attempt:$attempt,
       started_at:$started, finished_at:$finished, duration_s:$duration, rc:$rc,
       progressed:$progressed, commits:$commits, head_before:$head_before, head_after:$head_after,
-      log:$log, token_var:$token_var}
+      log:$log, token_var:$token_var, provider:$provider}
      + (if $agentmem == "" then {} else {agentmem: ($agentmem | split(" "))} end) + $target + $usage' >> "$logdir/turns.jsonl" 2>/dev/null || true
 }
 
@@ -483,12 +495,83 @@ model_for() { # model_for <engine> <phase> — そのフェーズに渡すモデ
   case "$1" in
     codex) printf '%s\n' "${GSD_LITE_CODEX_MODEL:-$(jq -r --arg phase "$2" '.codex.model[$phase] // empty' "$STATE")}" ;;
     opencode) printf '%s\n' "${GSD_LITE_OPENCODE_MODEL:-$(jq -r --arg phase "$2" '.opencode.model[$phase] // empty' "$STATE")}" ;;
-    *) jq -r --arg phase "$2" '.model[$phase] // empty' "$STATE" ;;
+    *)
+      # 接続先プロファイルの model は state.model より優先する（state の既定は Anthropic API のモデル名のため）
+      local provider
+      provider=$(provider_for "$2")
+      if [ -n "$provider" ] && [ -f "$(provider_file "$provider")" ]; then
+        jq -r '.model // empty' "$(provider_file "$provider")" 2>/dev/null | grep . && return 0
+      fi
+      jq -r --arg phase "$2" '.model[$phase] // empty' "$STATE" ;;
   esac
 }
 
+provider_for() { # provider_for <phase> — そのフェーズの Claude の接続先プロファイル名（空なら親環境のまま）
+  [ "$(engine_for "$1")" = claude ] || return 0
+  jq -r --arg phase "$1" '.claude.provider[$phase] // empty | tostring' "$STATE"
+}
+
+provider_file() { printf '%s/%s.json\n' "$PROVIDERS_DIR" "$1"; }
+
+# プロファイルの形の検証。問題があれば 1 行のメッセージを出す（無ければ何も出さない）
+PROVIDER_CHECK_JQ='
+  def names: test("^[A-Za-z_][A-Za-z0-9_]*$");
+  # 秘密に見える名前。MAX_OUTPUT_TOKENS のような「TOKENS」は数の設定なので含めない
+  def secretish: test("TOKEN($|_)|SECRET|PASSWORD|API_KEY|ACCESS_KEY");
+  def strmap: type == "object" and all(to_entries[]; (.key | names) and (.value | type == "string"));
+  if type != "object" then "not a JSON object"
+  elif (.env // {} | strmap | not) then "env must map variable names to strings"
+  elif (.secret_env // {} | strmap | not) then "secret_env must map variable names to variable names"
+  elif (.secret_env // {} | all(.[]; names) | not) then "secret_env values must be variable names (the secret itself goes in your environment)"
+  elif ((.model // "") | type != "string") or ((.limit_pattern // "") | type != "string") then "model and limit_pattern must be strings"
+  elif (.env // {} | keys | map(select(secretish)) | length > 0) then
+    "env has \(.env | keys | map(select(secretish)) | join(", ")) — move secrets to secret_env (value = the name of the variable holding it)"
+  else ((.env // {}) + (.secret_env // {}) | keys) as $k
+    | if ($k | any(. == "ANTHROPIC_BASE_URL" or . == "ANTHROPIC_API_KEY" or . == "ANTHROPIC_AUTH_TOKEN"
+          or . == "CLAUDE_CODE_USE_BEDROCK" or . == "CLAUDE_CODE_USE_VERTEX" or . == "CLAUDE_CODE_USE_FOUNDRY") | not)
+      then "sets no endpoint or credential (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY / CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX / CLAUDE_CODE_USE_FOUNDRY) — the turn would fall back to the subscription login"
+      elif ($k | index("ANTHROPIC_BASE_URL")) and ($k | any(. == "ANTHROPIC_AUTH_TOKEN" or . == "ANTHROPIC_API_KEY") | not)
+      then "ANTHROPIC_BASE_URL without ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY in secret_env would send the subscription login to that URL"
+      else empty end
+  end'
+
+check_provider() { # check_provider <name> — プロファイルが使える状態か（値は表示しない）。だめなら die
+  local name=$1 file msg src
+  case "$name" in
+    ''|*[!A-Za-z0-9_-]*) die "invalid Claude provider name: '$name' (state.claude.provider; letters, digits, - and _)" ;;
+  esac
+  file=$(provider_file "$name")
+  [ -f "$file" ] || die "Claude provider profile not found: $file (state.claude.provider uses '$name'; samples: templates/providers/ in gsd-lite)"
+  msg=$(jq -r "$PROVIDER_CHECK_JQ" "$file" 2>&1) || die "Claude provider profile $file is not valid JSON"
+  [ -z "$msg" ] || die "Claude provider profile $file: $msg"
+  for src in $(jq -r '.secret_env // {} | .[]' "$file"); do
+    [ -n "${!src:-}" ] || die "variable $src (secret_env of Claude provider '$name') is unset or empty — export it before starting"
+  done
+}
+
+apply_provider() { # apply_provider <name> — ターンのサブシェルの中で呼ぶ。親の接続先を外し、プロファイルの値を export する
+  local file key value src
+  file=$(provider_file "$1")
+  for key in $PROVIDER_CLEAR_VARS; do unset "$key"; done
+  # 値に改行を含みうる（ANTHROPIC_CUSTOM_HEADERS 等）ので NUL 区切りで受け取る
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    export "$key=$value"
+  done < <(jq -j '.env // {} | to_entries[] | "\(.key)\u0000\(.value)\u0000"' "$file")
+  while IFS= read -r -d '' key && IFS= read -r -d '' src; do
+    export "$key=${!src}"
+  done < <(jq -j '.secret_env // {} | to_entries[] | "\(.key)\u0000\(.value)\u0000"' "$file")
+}
+
+provider_summary() { # --status / --check 用: 接続先プロファイルを使うフェーズごとに 1 行（使わなければ何も出さない）
+  local p name
+  for p in $PHASES; do
+    name=$(provider_for "$p")
+    [ -z "$name" ] || echo "provider  : $p -> $name ($(provider_file "$name")$([ -f "$(provider_file "$name")" ] || echo ' — MISSING'))"
+  done
+}
+
 check_config() {
-  local check_phase skill_dir
+  local check_phase skill_dir check_provider_name
   jq -e '
     (.engine // "claude" | . == "claude" or . == "codex" or . == "opencode") and
     ((.phase_engines // {}) | type == "object" and
@@ -496,6 +579,10 @@ check_config() {
         (.key == "research" or .key == "plan" or .key == "impl" or .key == "verify" or .key == "reflect") and
         (.value == "claude" or .value == "codex" or .value == "opencode")))
   ' "$STATE" >/dev/null || die "invalid engine / phase_engines configuration"
+  jq -e '(.claude.provider // {}) | type == "object" and all(to_entries[];
+      (.key == "research" or .key == "plan" or .key == "impl" or .key == "verify" or .key == "reflect") and
+      (.value | type == "string"))' "$STATE" >/dev/null ||
+    die "invalid claude.provider configuration (an object of <phase>: <profile name>)"
   resolve_codex_sandbox
   if [ -n "${GSD_LITE_CODEX_SANDBOX:-}" ] && [ -n "$CODEX_SANDBOX_STATE" ] && [ "$GSD_LITE_CODEX_SANDBOX" != "$CODEX_SANDBOX_STATE" ] &&
      uses_engine codex; then
@@ -518,6 +605,8 @@ check_config() {
     fi
     [ -f "$skill_dir/gsd-lite-$check_phase/SKILL.md" ] ||
       die "missing $skill_dir/gsd-lite-$check_phase/SKILL.md (update project skills before starting)"
+    check_provider_name=$(provider_for "$check_phase")
+    [ -z "$check_provider_name" ] || check_provider "$check_provider_name"
   done
   check_git_identity
   check_target
@@ -604,7 +693,8 @@ check_claude_tokens() {
   TOKEN_VARS=()
   [ -n "${GSD_LITE_CLAUDE_TOKEN_VARS:-}" ] || return 0
   for p in $PHASES; do
-    [ "$(engine_for "$p")" = claude ] && uses_claude=1
+    # 接続先プロファイルを使うフェーズはトークンを使わない
+    [ "$(engine_for "$p")" = claude ] && [ -z "$(provider_for "$p")" ] && uses_claude=1
   done
   [ "$uses_claude" -eq 1 ] || return 0
   read -r -a TOKEN_VARS <<< "$GSD_LITE_CLAUDE_TOKEN_VARS"
@@ -1049,11 +1139,13 @@ status() {
   for display_phase in $PHASES; do
     display_engine=$(engine_for "$display_phase")
     display_model=$(model_for "$display_engine" "$display_phase")
-    echo "route     : $display_phase -> $display_engine (model: ${display_model:-CLI default})"
+    display_provider=$(provider_for "$display_phase")
+    echo "route     : $display_phase -> $display_engine (model: ${display_model:-CLI default}${display_provider:+, provider: $display_provider})"
   done
   echo "retry     : $(get_retry)/$(sget '.retry_max')"
   echo "subagents : $(sget '.subagents // "auto"')"
   codex_sandbox_summary
+  provider_summary
   token_summary
   trust_summary
   limits_summary
@@ -1172,6 +1264,7 @@ case "${1:-}" in
     require_state
     check_config
     codex_sandbox_summary
+    provider_summary
     token_summary
     trust_summary
     check_limit_values
@@ -1312,8 +1405,16 @@ while true; do
   fi
   # 任意: Claude のターンは GSD_LITE_CLAUDE_TOKEN_VARS のトークンをラウンドロビンで使う。
   # 値は env の引数に載せず（ps に見えない）、サブシェルで export してから起動する
+  # 接続先プロファイルを使うターンはトークンを切り替えず、プロファイルの値で起動する。
+  # 起動中に編集されても壊れた値で走らせないよう、ターンごとに検証し直す
   token_var=
-  if [ "$ENGINE" = claude ] && [ "${#TOKEN_VARS[@]}" -gt 0 ]; then
+  provider=$(provider_for "$phase")
+  turn_limit_pattern=$LIMIT_PATTERN
+  if [ -n "$provider" ]; then
+    check_provider "$provider"
+    provider_limit=$(jq -r '.limit_pattern // empty' "$(provider_file "$provider")")
+    [ -z "$provider_limit" ] || turn_limit_pattern="$LIMIT_PATTERN|$provider_limit"
+  elif [ "$ENGINE" = claude ] && [ "${#TOKEN_VARS[@]}" -gt 0 ]; then
     token_var=$(next_token_var)
   fi
   # OpenCode には achat を環境変数の設定で渡す。利用者が OPENCODE_CONFIG_CONTENT を使っていれば重ねる
@@ -1325,7 +1426,7 @@ while true; do
       { opencode_config=; echo "gsd-lite: WARN OPENCODE_CONFIG_CONTENT is not valid JSON — this turn runs without achat" >&2; }
   fi
   turn_agentmem=$(agentmem_names)
-  echo "gsd-lite: turn $((turn_before + 1)) [$ENGINE/$phase] $cmd (attempt $((retry + 1)))${token_var:+ (token: $token_var)}"
+  echo "gsd-lite: turn $((turn_before + 1)) [$ENGINE/$phase] $cmd (attempt $((retry + 1)))${token_var:+ (token: $token_var)}${provider:+ (provider: $provider)}"
   head_before=$(git rev-parse HEAD 2>/dev/null || echo "")
   target_head_before=""
   [ "$TARGET" = . ] || target_head_before=$(tgit rev-parse HEAD 2>/dev/null || echo "")
@@ -1335,6 +1436,7 @@ while true; do
   # timeout でハングを検知し（超過は kill）、進捗なし→リトライ経路に乗せる
   (
     [ -z "$token_var" ] || export CLAUDE_CODE_OAUTH_TOKEN="${!token_var}"
+    [ -z "$provider" ] || apply_provider "$provider"
     [ -z "$opencode_config" ] || export OPENCODE_CONFIG_CONTENT="$opencode_config"
     export GSD_LITE_UNATTENDED=1
     exec env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
@@ -1361,7 +1463,7 @@ while true; do
 
   if [ "$turn_after" -le "$turn_before" ]; then
     # 利用上限で落ちたターンは詰まりではないので retry を増やさず、待ってから同じターンをやり直す
-    if grep -Eqi -- "$LIMIT_PATTERN" "$log" 2>/dev/null ||
+    if grep -Eqi -- "$turn_limit_pattern" "$log" 2>/dev/null ||
        [ "$(echo "$usage_json" | jq -r '.rate_limit.status // empty')" = rejected ]; then
       # トークンを切り替えているなら、上限に当たったのはそのトークンだけかもしれない。
       # まだ当たっていないトークンが残っていれば待たずに次のトークンでやり直す

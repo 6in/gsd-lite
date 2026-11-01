@@ -25,6 +25,16 @@ gsd-lite の利用者から見た変更を、新しい順に記録する。バ�
   `agentmem_servers=`、`turns.jsonl` の `agentmem`（Issue #2）
 - allowlist の雛形に `mcp__agentmem` / `mcp__agentmem-gsd`（Issue #2）
 
+## 2026-10-28
+
+### 追加
+- **Claude の接続先をフェーズごとに変える**（任意）。`state.json` の `claude.provider.<phase>` にプロファイル名を書くと、
+  そのフェーズの Claude のターンだけを `~/.config/gsd-lite/providers/<名前>.json` の設定（`env` / `secret_env` /
+  `model` / `limit_pattern`）で起動する（例: impl だけ Bedrock・他社の Anthropic 互換 API）。親環境の認証・接続先の
+  変数は外し、トークンの切り替えは使わない。キーの値は環境変数で渡し、プロファイルには変数名だけを書く。
+  `--check` / `--status` に `provider` 行、`turns.jsonl` に `provider`。サンプルは `templates/providers/`
+  （`bedrock.json` / `anthropic-compatible.json`）。discuss が必要なときに選んで state に保存する
+
 ## 2026-10-23
 
 ### 追加

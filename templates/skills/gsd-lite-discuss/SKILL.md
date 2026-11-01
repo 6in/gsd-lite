@@ -27,6 +27,7 @@ disable-model-invocation: true
   推論強度は `opencode.variant.<phase>`、エージェントは `opencode.agent.<phase>`。
   空ならその CLI の設定を使用する。
 - 次のマイルストーンに移るときも `engine` / `phase_engines` / `model` / `codex`（`codex.sandbox` を含む）/ `opencode` /
+  `claude`（`claude.provider` を含む）/
   `subagents` / `reflect` / `limits` / `agentmem` は保持する（gsd-control 形では `.gsd-lite/config.json` の `defaults` が
   次のマイルストーンの初期値。選んだパターンを次回以降の既定にしたいときは `defaults` も更新してコミットする）。
 - 監視用サブエージェントが利用できない場合は `gsd-lite-loop.sh --status` で
@@ -204,6 +205,14 @@ DECISIONS.md でも不採用になっていないものを、最初の AUQ の�
      モデル変更希望があれば Claude は `model.<phase>`、
      Codex は `codex.model.<phase>` / `codex.reasoning_effort.<phase>`、
      OpenCode は `opencode.model.<phase>`（`provider/model`）/ `opencode.variant.<phase>` に設定する。
+   - **Claude の接続先**（Claude のフェーズがあり、ユーザーが Bedrock・他社の Anthropic 互換 API で動かしたいと
+     言ったとき、または state の `claude.provider` が空でないときだけ）: フェーズごとにプロファイル名を
+     `claude.provider.<phase>` に書く（空のフェーズは従来どおり親環境のログイン・トークン）。プロファイルは
+     `~/.config/gsd-lite/providers/<名前>.json`（`GSD_LITE_PROVIDERS_DIR`）にあるものから選ぶ。無ければ
+     インストール済みテンプレートの `providers/` のサンプルから作る手順を示し、URL・リージョン・モデル名は
+     ユーザーに確かめる。**キーの値はプロファイルにも state にも書かない**（`secret_env` には変数の名前だけ。
+     値は起動するシェルで export してもらう）。そのフェーズのモデルはプロファイルの `model` が優先する。
+     保存後の `--check` の `provider` 行を見せ、止まったら表示された理由（変数が空・プロファイルが無い等）を伝える
    - **サブエージェントの利用**を AUQ で選ぶ（state の `subagents`。既存値があればそれを既定に）:
      - `auto`（推奨）: impl はタスクの並列サブ作業をサブエージェントで並行実装し、verify は
        レビューとセキュリティチェックを並列化する。ターンあたりのトークン消費は増える。
@@ -306,7 +315,7 @@ DECISIONS.md でも不採用になっていないものを、最初の AUQ の�
    - state.json を**すべて更新してから**コミットする: `milestone`（kebab-case の
      スラッグ）/ `target`（`name` と `path`。in-repo 形は `{"name": "", "path": "."}` のままでよい）/
      `branch`（name と base）/ `research.targets` / `phase: "research"` /
-     `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `codex` / `subagents` / `reflect` / `limits` / `agentmem` /
+     `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `codex` / `claude` / `subagents` / `reflect` / `limits` / `agentmem` /
      `fix_round: 0` / `updated_at`（修正ラウンドは 0-a の記載どおり、ブランチを作らず
      `fix_round` / `phase` / `next_command` / `verify_round` / `updated_at` を更新）。
      そのうえで REQUIREMENTS.md / DECISIONS.md / state.json と追加・更新したスキル・設定
