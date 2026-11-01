@@ -1,0 +1,15 @@
+{
+  "_comment": "Claude を Amazon Bedrock 経由で使う接続先プロファイルのサンプル。~/.config/gsd-lite/providers/bedrock.json にコピーし、state.json の claude.provider.<phase> に \"bedrock\" と書いたフェーズだけがこれを使う。認証は Bedrock API キー（secret_env の値は「キーを持つ環境変数の名前」。キー自体はループを起動するシェルで export する）。EC2 のインスタンスロール・SSO など AWS の資格情報チェーンで認証するなら secret_env を丸ごと消す（キーは要らない。SSO なら env に AWS_PROFILE を書く）。モデル ID は Bedrock コンソールで有効にした推論プロファイルに合わせる。",
+  "env": {
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "AWS_REGION": "us-east-1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "us.anthropic.claude-opus-5-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "us.anthropic.claude-sonnet-4-6",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+  },
+  "secret_env": {
+    "AWS_BEARER_TOKEN_BEDROCK": "GSD_BEDROCK_API_KEY"
+  },
+  "model": "us.anthropic.claude-opus-5-5",
+  "limit_pattern": "Request rejected \\(429\\)|Repeated 529|ThrottlingException"
+}

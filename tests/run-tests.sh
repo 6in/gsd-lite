@@ -6,7 +6,7 @@ trap 'rm -rf "$TESTROOT"' EXIT
 LOOP=$(cd "$(dirname "$0")/.." && pwd)/bin/gsd-lite-loop.sh
 REPO_DIR=$(dirname "$(dirname "$LOOP")")
 # 呼び出し元のエンジン設定をテストに持ち込まない。
-unset GSD_LITE_ON_BLOCKED GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL GSD_LITE_CLAUDE_TOKEN_VARS CLAUDE_CODE_OAUTH_TOKEN GSD_LITE_MEMORY_MAX GSD_LITE_MEMORY_SWAP_MAX GSD_LITE_CPU_QUOTA GSD_LITE_IN_SCOPE GSD_LITE_SCOPE_LIMITS GSD_LITE_TOKEN_PICK
+unset GSD_LITE_ON_BLOCKED GSD_LITE_ENGINE GSD_LITE_CODEX_MODEL GSD_LITE_CODEX_SANDBOX GSD_LITE_TURN_TIMEOUT GSD_LITE_OPENCODE_MODEL GSD_LITE_CLAUDE_TOKEN_VARS CLAUDE_CODE_OAUTH_TOKEN GSD_LITE_MEMORY_MAX GSD_LITE_MEMORY_SWAP_MAX GSD_LITE_CPU_QUOTA GSD_LITE_IN_SCOPE GSD_LITE_SCOPE_LIMITS GSD_LITE_TOKEN_PICK GSD_LITE_PROVIDERS_DIR
 # トークンの利用枠の共有ファイルは利用者のもの（~/.local/state）を触らない
 export GSD_LITE_TOKEN_LIMITS="$TESTROOT/token-limits.json"
 # スタブは `codex sandbox` を実装しないので、sandbox probe は専用テスト以外で飛ばす。
@@ -1581,6 +1581,115 @@ OPENCODE_CONFIG_CONTENT='not json' AGENTMEM_TOKEN=secret-am GSD_LITE_OPENCODE_BI
 assert_eq "invalid OPENCODE_CONFIG_CONTENT is left as is" "$(sed -n 2p .gsd-lite/agentmem-seen.log)" "not json"
 grep -q 'WARN OPENCODE_CONFIG_CONTENT is not valid JSON' "$TESTROOT/loop-out.log" && ok "warns about invalid OPENCODE_CONFIG_CONTENT" || ng "invalid OPENCODE_CONFIG_CONTENT WARN"
 kill "$AM_PID" 2>/dev/null
+
+echo "== Test 51: Claude の接続先プロファイル（state.claude.provider.<phase>）=="
+export GSD_LITE_PROVIDERS_DIR="$TESTROOT/providers"
+mkdir -p "$GSD_LITE_PROVIDERS_DIR"
+# 改行入りの値（ANTHROPIC_CUSTOM_HEADERS）もそのまま渡ること
+jq -n '{env: {CLAUDE_CODE_USE_BEDROCK: "1", AWS_REGION: "us-west-2", ANTHROPIC_CUSTOM_HEADERS: "X-A: 1\nX-B: 2"},
+  secret_env: {AWS_BEARER_TOKEN_BEDROCK: "TEST_BR_KEY"}, model: "bedrock-model-stub",
+  limit_pattern: "Request rejected \\(429\\)"}' > "$GSD_LITE_PROVIDERS_DIR/fake.json"
+cat > "$TESTROOT/bin/claude-provider" <<'EOF'
+#!/usr/bin/env bash
+cmd=""; a=("$@")
+while [ $# -gt 0 ]; do case "$1" in -p) cmd="$2"; shift 2;; *) shift;; esac; done
+printf '%s oauth=%s apikey=%s base=%s bedrock=%s awstok=%s region=%s headers=%s\n' "$cmd" \
+  "${CLAUDE_CODE_OAUTH_TOKEN:-<unset>}" "${ANTHROPIC_API_KEY:-<unset>}" "${ANTHROPIC_BASE_URL:-<unset>}" \
+  "${CLAUDE_CODE_USE_BEDROCK:-<unset>}" "${AWS_BEARER_TOKEN_BEDROCK:-<unset>}" "${AWS_REGION:-<unset>}" \
+  "$(printf '%s' "${ANTHROPIC_CUSTOM_HEADERS:-}" | wc -l)" >> .gsd-lite/provider-seen.log
+exec "$(dirname "$0")/claude-happy" "${a[@]}"
+EOF
+chmod +x "$TESTROOT/bin/claude-provider"
+make_project "$TESTROOT/p51"
+echo .gsd-lite/provider-seen.log >> .gitignore
+git add -A && git commit -qm "ignore provider log"
+commit_state '.claude.provider.impl="fake"'
+TEST_BR_KEY=br-secret CLAUDE_CODE_OAUTH_TOKEN=parent-token ANTHROPIC_API_KEY=leftover-key ANTHROPIC_BASE_URL=https://parent.example \
+  TOK_A=secret-aaa TOK_B=secret-bbb GSD_LITE_CLAUDE_TOKEN_VARS="TOK_A TOK_B" \
+  GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-provider" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "provider cycle DONE" "$?" "0"
+assert_eq "impl turns use the profile and drop the parent credentials" \
+  "$(grep '^/gsd-lite-impl ' .gsd-lite/provider-seen.log | sort -u)" \
+  "/gsd-lite-impl oauth=<unset> apikey=<unset> base=<unset> bedrock=1 awstok=br-secret region=us-west-2 headers=1"
+assert_eq "other turns keep the parent environment and the token rotation" \
+  "$(grep -v '^/gsd-lite-impl ' .gsd-lite/provider-seen.log | awk '{print $1, $2, $3, $5}' | paste -sd,)" \
+  "/gsd-lite-research oauth=secret-aaa apikey=leftover-key bedrock=<unset>,/gsd-lite-plan oauth=secret-bbb apikey=leftover-key bedrock=<unset>,/gsd-lite-verify oauth=secret-aaa apikey=leftover-key bedrock=<unset>,/gsd-lite-reflect oauth=secret-bbb apikey=leftover-key bedrock=<unset>"
+assert_eq "profile model overrides state.model for impl only" \
+  "$(grep -o -- '--model [^ ]*' .gsd-lite/stub-args.log | paste -sd,)" \
+  "--model sonnet-stub,--model opus-stub,--model bedrock-model-stub,--model bedrock-model-stub,--model opus-stub,--model haiku-stub"
+assert_eq "turns.jsonl records the provider instead of a token" \
+  "$(jq -r '"\(.phase):\(.provider):\(.token_var)"' .gsd-lite/logs/toy/turns.jsonl | paste -sd,)" \
+  "research::TOK_A,plan::TOK_B,impl:fake:,impl:fake:,verify::TOK_A,reflect::TOK_B"
+grep -q '\[claude/impl\] /gsd-lite-impl (attempt 1) (provider: fake)' "$TESTROOT/loop-out.log" && ok "turn line names the provider" || ng "turn line provider"
+grep -q 'br-secret' .gsd-lite/logs/toy/turns.jsonl "$TESTROOT/loop-out.log" && ng "provider secret leaked" || ok "provider secret never printed"
+out=$("$LOOP" --status)
+echo "$out" | grep -q '^route     : impl -> claude (model: bedrock-model-stub, provider: fake)' && ok "status route shows the provider" || ng "status route ($out)"
+echo "$out" | grep -q "^provider  : impl -> fake ($GSD_LITE_PROVIDERS_DIR/fake.json)" && ok "status lists the profile" || ng "status provider line"
+# --check: 秘密の変数が無ければ止める（値は出さない）
+"$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "missing secret variable fails --check" "$?" "6"
+grep -q 'variable TEST_BR_KEY (secret_env of Claude provider .fake.) is unset' "$TESTROOT/check.log" && ok "check names the secret variable" || ng "secret variable message ($(cat "$TESTROOT/check.log"))"
+TEST_BR_KEY=x "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "valid profile passes --check" "$?" "0"
+grep -q '^provider  : impl -> fake' "$TESTROOT/check.log" && ok "check lists the profile" || ng "check provider line"
+# 接続先を使わない Claude のフェーズが無ければトークン変数は要求しない
+commit_state '.claude.provider = {research: "fake", plan: "fake", impl: "fake", verify: "fake", reflect: "fake"}'
+TEST_BR_KEY=x GSD_LITE_CLAUDE_TOKEN_VARS="TOK_MISSING" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "token vars not required when every Claude phase uses a provider" "$?" "0"
+# 壊れたプロファイル・state はそれぞれの理由で止める
+bad_profile(){ # bad_profile <説明> <JSON> <メッセージの一部>
+  printf '%s\n' "$2" > "$GSD_LITE_PROVIDERS_DIR/bad.json"
+  commit_state '.claude.provider = {impl: "bad"}' > /dev/null
+  TEST_BR_KEY=x GW_KEY=x "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+  assert_eq "$1 rejected" "$?" "6"
+  grep -qF -- "$3" "$TESTROOT/check.log" && ok "$1 message" || ng "$1 message ($(cat "$TESTROOT/check.log"))"
+}
+bad_profile "secret in env" '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_BEARER_TOKEN_BEDROCK": "raw"}}' 'move secrets to secret_env'
+bad_profile "base URL without a key" '{"env": {"ANTHROPIC_BASE_URL": "https://x.example"}}' 'would send the subscription login'
+bad_profile "no endpoint" '{"env": {"AWS_REGION": "us-east-1"}}' 'sets no endpoint or credential'
+bad_profile "secret value instead of a name" '{"env": {"ANTHROPIC_BASE_URL": "https://x.example"}, "secret_env": {"ANTHROPIC_AUTH_TOKEN": "sk-raw-value!"}}' 'secret_env values must be variable names'
+bad_profile "broken JSON" '{"env": ' 'is not valid JSON'
+printf '%s\n' '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000"}}' > "$GSD_LITE_PROVIDERS_DIR/bad.json"
+"$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "count settings named *_TOKENS are not treated as secrets" "$?" "0"
+commit_state '.claude.provider = {impl: "nowhere"}'
+"$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "missing profile rejected" "$?" "6"
+grep -qF "profile not found: $GSD_LITE_PROVIDERS_DIR/nowhere.json" "$TESTROOT/check.log" && ok "missing profile names the path" || ng "missing profile message"
+commit_state '.claude.provider = {impl: "../fake"}'
+"$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "path-like provider name rejected" "$?" "6"
+commit_state '.claude.provider = {deploy: "fake"}'
+"$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "unknown phase in claude.provider rejected" "$?" "6"
+# 接続先の limit_pattern に当たったターンは、無進捗のリトライではなく利用上限の待機として扱う
+cat > "$TESTROOT/bin/claude-429" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *"-p /gsd-lite-impl"*) echo "API Error: Request rejected (429) · this may be a temporary capacity issue"; exit 1 ;; esac
+exec "$(dirname "$0")/claude-happy" "$@"
+EOF
+chmod +x "$TESTROOT/bin/claude-429"
+make_project "$TESTROOT/p51b"
+commit_state '.claude.provider.impl="fake" | .retry_max=5'
+TEST_BR_KEY=x GSD_LITE_LIMIT_WAIT=0 GSD_LITE_LIMIT_MAX=1 GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-429" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "provider limit_pattern leads to the usage-limit path" "$?" "2"
+grep -q 'auto-BLOCKED (usage limit persisted)' <(git log --format=%s -1) && ok "blocked as a usage limit, not as no progress" || ng "limit path ($(git log --format=%s -1))"
+# Codex のフェーズに書かれた claude.provider は使わない
+make_codex_project "$TESTROOT/p51c"
+commit_state '.claude.provider.impl="nowhere"'
+GSD_LITE_CODEX_BIN="$TESTROOT/bin/codex-happy" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "provider ignored for Codex phases" "$?" "0"
+# 雛形とサンプル
+assert_eq "templates carry claude.provider" "$(jq -c '.claude.provider' "$REPO_DIR/templates/state.json"),$(jq -c '.defaults.claude.provider' "$REPO_DIR/templates/config.json")" "{},{}"
+make_project "$TESTROOT/p51d"
+for sample in "$REPO_DIR"/templates/providers/*.json; do
+  name=$(basename "$sample" .json)
+  cp "$sample" "$GSD_LITE_PROVIDERS_DIR/$name.json"
+  commit_state ".claude.provider = {impl: \"$name\"}"
+  GSD_BEDROCK_API_KEY=x GSD_THIRD_PARTY_API_KEY=x "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+  assert_eq "sample $name passes --check" "$?" "0"
+done
+unset GSD_LITE_PROVIDERS_DIR
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

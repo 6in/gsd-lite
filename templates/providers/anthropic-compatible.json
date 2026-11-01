@@ -1,0 +1,16 @@
+{
+  "_comment": "Claude Code を他社の Anthropic 互換 API（Messages API 互換のエンドポイントを持つサービスや LLM ゲートウェイ）に向ける接続先プロファイルのサンプル。~/.config/gsd-lite/providers/<名前>.json にコピーし、URL とモデル名を接続先のドキュメントに合わせて書き換える。API キーは secret_env に「キーを持つ環境変数の名前」を書き、キー自体はループを起動するシェルで export する。ANTHROPIC_BASE_URL だけでキーを渡さないと、サブスクリプションのログインがその URL に送られるので、ループは起動を拒む。",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.example.com/anthropic",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "<接続先のモデル名>",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "<接続先のモデル名>",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<接続先の軽いモデル名>",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "secret_env": {
+    "ANTHROPIC_AUTH_TOKEN": "GSD_THIRD_PARTY_API_KEY"
+  },
+  "model": "<接続先のモデル名>",
+  "limit_pattern": "Request rejected \\(429\\)|Too Many Requests"
+}

@@ -50,6 +50,9 @@
 > `permission_denials` は区間ごとの値なので全区間を合計・連結し、`segments` に区間数を残す。BLOCKED で止まったとき
 > （このプロセスのターンで BLOCKED になった場合と、ループ開始後の前提エラー）に `hooks/on-blocked.sh` と
 > `GSD_LITE_ON_BLOCKED` を呼ぶ。ループ開始後の前提エラーも on-exit を通して終える（§7）。
+> ループ本体追補（2026-10-28）: Claude のフェーズごとに接続先プロファイルを選べる（`state.claude.provider.<phase>` に
+> 名前、`~/.config/gsd-lite/providers/<名前>.json` に env / secret_env / model / limit_pattern、秘密の値は環境変数）。
+> 一部のフェーズだけを Bedrock・他社の Anthropic 互換 API に向けるため（§7「接続先プロファイル」）。
 > achat 追補（2026-11-01、Issue #2）: 学びをリポジトリ・マシンをまたいで共有するため、achat（agentmem MCP。作業の記録・
 > 記憶・掲示板）を任意でつなぐ。state の `agentmem`（`url` / `project` / `shared_project`）と環境変数 `AGENTMEM_TOKEN` が
 > あるターンにだけ、ループが MCP サーバー `agentmem`（対象リポジトリの project）と `agentmem-gsd`（gsd-lite を使う全リポジトリで
@@ -539,6 +542,16 @@ done
   次のターンは使用率（5 時間枠と 7 日枠の大きい方。リセット済みの枠は 0、記録なしも 0）が最も低い変数を選び、
   同率なら順番どおり。rejected で使用率が来なかった枠は 1 とみなす。`GSD_LITE_TOKEN_PICK=round-robin` で従来の
   順番どおり。`--tokens` で共有ファイルを表示する（進捗判定には使わない）
+- **接続先プロファイル**（`state.claude.provider.<phase>` 設定時。Claude のフェーズだけ）: 名前は
+  `[A-Za-z0-9_-]+`、中身は `${GSD_LITE_PROVIDERS_DIR:-~/.config/gsd-lite/providers}/<名前>.json`（マシンごと。
+  リポジトリに入れない）。そのターンのサブシェルで、親環境の認証・接続先の変数（`CLAUDE_CODE_OAUTH_TOKEN` /
+  `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_USE_BEDROCK|VERTEX|FOUNDRY` /
+  モデルの対応など）を外し、`env` をそのまま、`secret_env`（渡す先 → 値を持つ変数の名前）を間接参照で export する。
+  `model` は `state.model.<phase>` より優先、`limit_pattern` は `GSD_LITE_LIMIT_PATTERN` に足して利用上限の判定に使う。
+  トークンの切り替えと利用枠の記録はしない（`turns.jsonl` は `provider` を記録）。`--check`・起動時・各ターンの前に
+  検証し、だめなら終了コード 6: ファイルが無い / 形が違う / 秘密に見える名前が `env` にある / `secret_env` の変数が空 /
+  接続先も認証も決めていない（サブスクリプションのログインに戻る）/ `ANTHROPIC_BASE_URL` に
+  `ANTHROPIC_AUTH_TOKEN|API_KEY` が無い（保存されたログインがその URL に送られる）。値は表示しない
 - **使用量の記録**: Claude のターンは `--output-format stream-json --verbose` で起動し、`result`
   イベントから `usage` / `total_cost_usd` / `num_turns` / `permission_denials` を、`rate_limit_event` から
   利用枠の使用率を取り出して `turns.jsonl` に足す（Codex はログ末尾の `tokens used` の合計のみ）。
