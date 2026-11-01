@@ -27,7 +27,7 @@ disable-model-invocation: true
   推論強度は `opencode.variant.<phase>`、エージェントは `opencode.agent.<phase>`。
   空ならその CLI の設定を使用する。
 - 次のマイルストーンに移るときも `engine` / `phase_engines` / `model` / `codex`（`codex.sandbox` を含む）/ `opencode` /
-  `subagents` / `reflect` / `limits` は保持する（gsd-control 形では `.gsd-lite/config.json` の `defaults` が
+  `subagents` / `reflect` / `limits` / `agentmem` は保持する（gsd-control 形では `.gsd-lite/config.json` の `defaults` が
   次のマイルストーンの初期値。選んだパターンを次回以降の既定にしたいときは `defaults` も更新してコミットする）。
 - 監視用サブエージェントが利用できない場合は `gsd-lite-loop.sh --status` で
   確認する方法を案内する。
@@ -58,7 +58,8 @@ in-repo 形では以下の「gsd-control 形」の注記を無視し、従来ど
   `git checkout -b gsd-lite/<slug>`（制御側。いまいたブランチが制御側の base）と `mkdir -p $MS` を
   作ってから議論を始める（4 のインライン文書化の書き先が必要なため）。
   state は `jq -s '.[0] * .[1].defaults' <テンプレート>/state.json .gsd-lite/config.json > $MS/state.json`
-  で作り、`target: {name: "<name>", path: "work/<name>"}` を入れる（テンプレートはホスト用の
+  で作り、`target: {name: "<name>", path: "work/<name>"}` を入れる（`targets.<name>.agentmem_project` があれば
+  `agentmem.project` にも写す。achat の project は対象ごとに違うため）（テンプレートはホスト用の
   `~/.claude/gsd-lite/templates/` 等。init と同じ場所）
 - **0-b の退避は行わない**（マイルストーンごとにディレクトリが分かれている）。`.gsd-lite/reflect/` の
   直近 2 件の「次回への提案」は同様に読む
@@ -119,6 +120,12 @@ DECISIONS.md でも不採用になっていないものを、最初の AUQ の�
   `git -C $TARGET add AGENTS.md CLAUDE.md` → `git -C $TARGET commit -m "gsd-lite(discuss): <slug> AGENTS.md に作業上の決まりを追加"`
   でコミットする（対象の base には直接コミットしない。MR / マージで base に入る）
 
+**0-d. achat の過去知見**（このセッションで achat のツール `agentmem` / `agentmem-gsd` が見えるときだけ。見えなければ
+飛ばす）: 要望を聞いたら最初のラウンドの前に、要望の主題をクエリにして `recall`、`search_board`（つながっている
+サーバー全部）、`search_tasks`（scope `project`）を引く。当たったものは質問の材料にする（「以前この型で〇〇が問題に
+なっている（スレッド: <題名>）が、今回はどうするか」）。結果をそのまま並べて見せない。掲示板は achat の project の中で
+しか検索できないので、gsd-lite 共有の project（`agentmem-gsd`）も引く。`rate_thread` はしない
+
 ## 1. プロトコル: デザインツリーとフロンティア
 
 議論全体を**デザインツリー**として扱う。すべての決定は、その決定に依存する子の
@@ -169,8 +176,9 @@ DECISIONS.md でも不採用になっていないものを、最初の AUQ の�
    足りなければフロンティアに戻す
 3. 最終 AUQ で以下を確認する:
    - 確定内容サマリーへの合意
-   - research の調査対象（similar_oss / official_docs / local_projects、
-     multiSelect・デフォルト全選択）→ state.json の `research.targets` へ
+   - research の調査対象（similar_oss / official_docs / local_projects、achat がつながっていれば agentmem も。
+     multiSelect・デフォルト全選択）→ state.json の `research.targets` へ。`agentmem` は achat の掲示板・記憶・
+     過去の作業記録で、他の人・他のマシンの知見まで届く（手順 4 の achat の設定が `--check` で接続になっているときだけ出す）
 4. **実行パターンを選ぶ（ループ起動前に毎回）**:
    - 対話しているホストと実行エンジンは独立。Claude Code から Codex や OpenCode に任せてもよい。
    - 現在の設定をフェーズ別に表示し、次のパターンを対話で選んでもらう。
@@ -236,6 +244,24 @@ DECISIONS.md でも不採用になっていないものを、最初の AUQ の�
        デスクトップ通知）の行を有効にする。Webhook URL などの宛先はリポジトリに書かず環境変数で渡す
        （スクリプトごとリポジトリの外に置くなら `GSD_LITE_ON_BLOCKED=<パス>` で起動する）
      - **通知なし**（短時間で見守る、またはこまめに `--status` を見る。確認する頻度を DECISIONS.md に書く）
+   - **achat（agentmem MCP。任意）**: 学びをリポジトリ・マシンをまたいで共有する。`gsd-lite-loop.sh --check` の
+     `agentmem` 行を見る:
+     - `off` で、利用者が achat を使っている（`AGENTMEM_TOKEN` が設定されている、またはプロジェクトの `.mcp.json` に
+       agentmem がある）なら、AUQ で「使う / 使わない」を聞く（初回か変更希望があるときだけ）。使うなら次を聞いて
+       state の `agentmem` に保存する: `url`（achat ポータルの MCP 設定タブにある接続先。`/mcp` まで）、`project`
+       （このリポジトリの achat project の slug。gsd-control 形で `targets.<name>.agentmem_project` があればそれ）、
+       `shared_project`（gsd-lite を使う全リポジトリで共有する project の slug。gsd-control 形で config.json の
+       `defaults.agentmem.shared_project` があればそれ。無ければ案として `gsd-lite`）。掲示板は project の中でしか
+       検索できないので、gsd-lite 自体の学びは共有側に書く。両方の project に参加しておく必要がある
+       （AM012 / AM013 は未参加。achat ポータルで参加する）
+     - ループは state の `agentmem` と環境変数 `AGENTMEM_TOKEN` があるターンにだけ、MCP サーバー `agentmem` と
+       `agentmem-gsd` をエンジンに渡す（トークンの値はどこにも書かない）。保存後の `--check` の WARN をそのまま伝える:
+       トークン未設定 → ループを起動するシェルで `export AGENTMEM_TOKEN=...`（DECISIONS.md には変数名だけ書く）/
+       届かない → url を確かめる（届かなくてもループは止まらず、achat なしで進む）/
+       フックの WARN → `.claude/settings.json` の achat のフック（`/api/digest` / `/api/suggest` の curl）を、無人ターンでは
+       動かない形に直すかを AUQ で聞く。直すなら各 command の先頭に `[ -n "${GSD_LITE_UNATTENDED:-}" ] || ` を足す
+       （ループはターンに `GSD_LITE_UNATTENDED=1` を渡す。対話のセッションではこれまでどおり動く）
+     - 決めたことは DECISIONS.md に記録する
    - **選択したエンジンの準備**: 現在のホストのインストール済みテンプレートを使い、
      Claude が含まれれば `.claude/skills/`、Codex が含まれれば `.agents/skills/`、
      OpenCode が含まれれば `.opencode/skills/` に
@@ -280,7 +306,7 @@ DECISIONS.md でも不採用になっていないものを、最初の AUQ の�
    - state.json を**すべて更新してから**コミットする: `milestone`（kebab-case の
      スラッグ）/ `target`（`name` と `path`。in-repo 形は `{"name": "", "path": "."}` のままでよい）/
      `branch`（name と base）/ `research.targets` / `phase: "research"` /
-     `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `codex` / `subagents` / `reflect` / `limits` /
+     `next_command: "/gsd-lite-research"` / `engine` / `phase_engines` / `codex` / `subagents` / `reflect` / `limits` / `agentmem` /
      `fix_round: 0` / `updated_at`（修正ラウンドは 0-a の記載どおり、ブランチを作らず
      `fix_round` / `phase` / `next_command` / `verify_round` / `updated_at` を更新）。
      そのうえで REQUIREMENTS.md / DECISIONS.md / state.json と追加・更新したスキル・設定
@@ -288,6 +314,9 @@ DECISIONS.md でも不採用になっていないものを、最初の AUQ の�
      （`gsd-lite(discuss): <slug> 要件確定`）。
      **遷移（next_command）までコミットに含めるのが重要** — コミット後に state を
      いじると、git 復元時に要件確定済みなのに DISCUSS へ戻ってしまう
+   - achat のツールが見えるなら、コミットの後に 0-c で採った AGENTS.md の決まりを `agentmem` の `remember` に
+     1 件ずつ残す（kind `preference`、scope `repo`。先に `set_context` で repo_url（`git -C $TARGET remote get-url origin`）・
+     base_path・branch を登録する）。正本は AGENTS.md で、achat は横断検索のための写し。秘密や顧客名は書かない
 6. 最後の AUQ で「今すぐループを起動するか」「起動する場合、このセッションで
    進捗を見守るか」を確認する:
    - **起動する**: `setsid gsd-lite-loop.sh >> .gsd-lite/logs/loop.log 2>&1 &` で（手順 4 で付けると決めた

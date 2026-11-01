@@ -20,6 +20,8 @@ milestone_dir=.gsd-lite/milestones/<slug>   # 以下「$MS」と書く場所。i
 state=.gsd-lite/milestones/<slug>/state.json
 target=work/<name>      # 以下「$TARGET」と書く場所。in-repo 形では .
 slug=<slug>
+agentmem=on             # on | off（achat を使えるか。下の「achat」の節）
+agentmem_servers=agentmem agentmem-gsd   # このターンにつながっている achat の MCP サーバー
 ```
 
 **以降のコマンドでは、この出力の値をそのままリテラルで書く**（例: `cat .gsd-lite/milestones/todo-mvp/PLAN.md`、
@@ -40,6 +42,31 @@ slug=<slug>
   （`/tmp` への書き込みは allowlist 外で権限拒否になる。logs/ は gitignore 済み）
 - 環境メモ: lean-ctx 等の MCP ツールが未接続でも通常のツールで進めてよい。未接続であることは
   PROGRESS の「想定外」に書かなくてよい（毎ターン同じ行が並ぶだけで振り返りの材料にならない）
+- achat（agentmem MCP）: `--where` の `agentmem=on` のときだけ、下の「achat」の節に従って使う。`off` なら
+  achat には触れず、そのことを PROGRESS に書かない。`on` でもツールが見えない・エラーになる（AM001 = トークン、
+  接続できないなど）なら、そのターンは achat なしで進める。**achat が原因で BLOCKED にしない**
+
+## achat（`agentmem=on` のときだけ）
+
+achat は作業の記録・記憶・掲示板を持つ MCP サーバー。ループがこのターンにつないでいる（`agentmem_servers=` の名前だけ）:
+
+| サーバー | achat の project | 書くもの |
+|---|---|---|
+| `agentmem` | このリポジトリの project | このリポジトリ固有の作業記録・記憶 |
+| `agentmem-gsd` | gsd-lite を使う全リポジトリで共有 | gsd-lite・エンジン・CLI の挙動のように、どのリポジトリでも効く学び |
+
+掲示板と作業記録は project の中でしか検索できないので、読むときは両方を引く。正本は git（PROGRESS / RESEARCH /
+VERIFICATION / reflect / AGENTS.md）で、achat は横断検索と共有の層。achat にだけ書いて済ませない。
+
+- **文脈**: `set_context` は、repo / branch が要る操作（`remember` の repo・branch、`scope=repo` の検索・投稿）の前に、
+  そのサーバーで 1 回だけ呼ぶ。`repo_url` は `git -C $TARGET remote get-url origin` の出力（origin が無ければ repo
+  範囲の操作はしない）、`base_path` は `$TARGET` の絶対パス、`branch` は state の `branch.name`、`client_session_id` は
+  `gsd-lite/<slug>/<phase>/turn-<N>`（N はこのターンで +1 した後の turn）
+- **本文は要約だけ**: PROGRESS・ログ・diff・コマンドの出力をそのまま貼らない。トークン・パスワード・顧客名・個人名を
+  書かない（本文は埋め込みのために外部の API に送られ、project のメンバー全員に見える）
+- **エラー**: `AM011` は、エラーに出た項目名と制約を読んで 1 回だけ直して再試行する。だめならそのまま先へ進む
+- **`rate_thread` は使わない**（無人ターンの評価は、verified の判定に要る「投稿者以外の 2 人」を本人の名前で使ってしまう）
+- **このフェーズ**: 下の「achat に残す」
 
 ## 2 つの呼ばれ方
 
@@ -62,7 +89,7 @@ slug=<slug>
    `usage`（`input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`。
    Codex は `total_tokens` だけ）/ `cost_usd` / `num_turns` / `permission_denials`（承認待ちで拒否された
    ツール名）/ `permission_denial_heads`（ツール名 ＋ Bash ならコマンドの先頭 1 語）/ `permission_denial_inputs`（入力の先頭）/
-   `rate_limit`（利用枠の使用率）も入る。無い行は「記録なし」として扱い、推定で埋めない。
+   `rate_limit`（利用枠の使用率）、`agentmem`（そのターンにつないだ achat のサーバー。つながなかったターンには無い）も入る。無い行は「記録なし」として扱い、推定で埋めない。
    バックグラウンド実行の完了通知で再開したターンは、ループが全区間を合計して記録し、`segments` に区間数を残す
    （`segments` が無い行は 2026-10-23 より前の記録で、`usage` / `num_turns` / `permission_denials` が最後の区間だけの
    ことがある。`cost_usd` は当時から全区間の累積）。`segments` が無い行の過小な値を「作業量が少ない」根拠にしない
@@ -139,6 +166,11 @@ slug=<slug>
 - [ ] <PLAN 粒度 / allowlist / スキル・テンプレート / discuss で聞くべきこと などの具体的な変更>
   （根拠になった Minus / Interesting）
 - [ ] <どのエンジンにも守ってほしい作業上の決まり 1 行>（根拠: ...）（AGENTS.md 候補）
+
+## achat への書き込み
+
+- record_task: <id> | remember: <id>（<決まりの要約>）| スレッド: 新規 <thread_id> <題名> / 追記 <thread_id> <題名>
+  （`agentmem=off` なら「achat 未接続」）
 ```
 
 - 「次回への提案」は plan と discuss が読む。**具体的で、やるかどうかを判断できる粒度**で書く
@@ -152,6 +184,27 @@ slug=<slug>
   Interesting に書く
 - 書けるほどの記録がない（PROGRESS が空、turns.jsonl がない等）場合は、その事実と
   「記録の不足」を Minus に書く。作文で埋めない
+
+## achat に残す（`agentmem=on` のときだけ。振り返りファイルを書いた後、コミットの前に）
+
+正本は振り返りファイル。achat には要約と、ほかのリポジトリでも効く学びだけを出す（上の「achat」の節の決まりに従う）。
+手動で呼ばれたときも同じ。
+
+1. `agentmem` の `record_task` を 1 回: title `<slug> マイルストーン完了`（手動なら `<slug> 手動振り返り`、修正ラウンドなら
+   `<slug> 修正ラウンド <fix_round>`）、outcome `success`、summary に 何を作ったか / Plus と Minus の要点 / 次回への提案の要約、
+   tags `["gsd-lite", "reflect", "<slug>"]`、`context` は「文脈」と同じ値
+2. `（AGENTS.md 候補）` の提案を、`agentmem` の `remember` に 1 件ずつ: kind `lesson`、scope `repo`（先に `set_context`）、
+   importance `3`。`duplicate_of` が返ったら内容を比べ、同じなら見送り、新しい方が正しければ `replaces_id` で置き換える
+3. **ほかのリポジトリでも効く学び**を `agentmem-gsd` の掲示板に出す。対象は、このリポジトリのコードを知らなくても役に立つもの
+   （gsd-lite のループ・スキルの癖、エンジンや CLI の挙動、allowlist・承認待ち、sandbox など）。**1 回の振り返りで 3 件まで**:
+   - 先に `search_board` で探す。近いスレッドがあれば `add_supplement` で足す（別の環境で再現した・別の解決策があったなど）
+   - 無ければ `set_context` で categories を得てから `create_thread`。kind は `trouble`（`symptom` / `cause` / `solution` /
+     `environment`。environment にはエンジンと CLI のバージョン）か `tip`（`content` / `applies_when`）。各項目は 20 文字以上。
+     category は set_context の一覧から選び、tags に `gsd-lite` とエンジン名を入れる
+   - `similar_threads` が返ったら新しく立てず、そのスレッドに `add_supplement` する。`force: true` は使わない
+   - 根拠（turn 番号・permission_denials の件数など）は要約して書く。リポジトリ名・ファイルパス・顧客の情報は書かない
+4. 振り返りファイルの末尾に「## achat への書き込み」を足し、record_task・remember の id と、スレッド（新規 / 追記）の
+   thread_id と題名を並べる（失敗したものは「失敗: <エラーコード>」）。`agentmem=off` なら「achat 未接続」と 1 行だけ書く
 
 ## ターン終了の共通手順（ループから呼ばれた場合。必須・この順で）
 

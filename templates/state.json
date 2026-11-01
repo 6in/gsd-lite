@@ -7,6 +7,7 @@
   "subagents": "auto",
   "reflect": true,
   "limits": { "memory_max": "", "cpu_quota": "" },
+  "agentmem": { "url": "", "project": "", "shared_project": "" },
   "fix_round": 0,
   "target": { "name": "", "path": "." },
   "milestone": "",

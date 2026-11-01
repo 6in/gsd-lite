@@ -126,7 +126,10 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
    雛形の `deny` にある `mcp__lean-ctx` は、ユーザー設定で lean-ctx の MCP を登録している環境で無人ターンが
    `ctx_shell` などを呼び、承認待ちで拒否されるのを防ぐ（上の allow は `Bash(...)` 向けで MCP ツールには当たらない）。
    ほかにも無人ターンに見える MCP サーバがあるなら、使わせるものは allow に、使わせないものは deny に足す。
-   ループは拒否されたツールを `turns.jsonl` の `permission_denials` と WARN で知らせる
+   ループは拒否されたツールを `turns.jsonl` の `permission_denials` と WARN で知らせる。
+   雛形の allow にある `mcp__agentmem` / `mcp__agentmem-gsd` は achat（agentmem MCP）のツール。ループが state の
+   `agentmem` と環境変数 `AGENTMEM_TOKEN` があるターンにだけ渡すので、使わないプロジェクトでは何も起きない
+   （使うかどうかと接続先は discuss が聞く）
    **Codex ではこの手順をスキップ**。ループは workspace-write sandbox と
    approval_policy=never で動き、コミット用に Git 管理ディレクトリを追加する。
    ネットワークや追加パスなど必要な権限は起動前に環境側で用意する。
@@ -134,7 +137,7 @@ Claude の AskUserQuestion や allowlist を Codex / OpenCode に要求しない
    （`codex sandbox -- true` が失敗する）では `--check` が止めるので、
    state の `codex.sandbox` を `danger-full-access`（隔離環境向け。discuss で選ぶ）にするかカーネル設定で対処する。
    無人ターンは MCP の承認プロンプトに応答できないため、Codex 側で承認必須の
-   MCP ツールは使えない点にも注意する。
+   MCP ツールは使えない点にも注意する（achat はループが `default_tools_approval_mode="approve"` を付けて渡すので使える）。
    **OpenCode でもこの手順をスキップ**。ループは `opencode run --dangerously-skip-permissions`
    で動き、明示的に `deny` されていない権限を自動承認する（`opencode.json` の
    `permission` で `deny` にしたものはそのまま拒否される。`ask` は無人ターンでは
