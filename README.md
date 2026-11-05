@@ -429,6 +429,8 @@ gsd-lite-loop.sh --tokens   # 各トークンの残り（5 時間 / 7 日の使�
 - `limit_pattern`: その接続先の利用上限・スロットリングの文言（拡張正規表現）。`GSD_LITE_LIMIT_PATTERN` に足して判定し、
   当たったターンは無進捗のリトライではなく利用上限の待機（`GSD_LITE_LIMIT_WAIT`）として扱う
 
+Bedrock の例:
+
 ```bash
 mkdir -p ~/.config/gsd-lite/providers
 cp ~/.claude/gsd-lite/templates/providers/bedrock.json ~/.config/gsd-lite/providers/   # リージョン・モデル ID を直す
@@ -438,6 +440,22 @@ export GSD_BEDROCK_API_KEY='...'   # Bedrock API キー
 gsd-lite-loop.sh --check           # provider 行とプロファイル・変数の検証
 gsd-lite-loop.sh --status          # route 行に provider が出る
 ```
+
+他社の Anthropic 互換 API（Messages API 互換のエンドポイントや LLM ゲートウェイ）の例。プロファイル名は好きに付けてよい
+（ここでは `myapi`）:
+
+```bash
+mkdir -p ~/.config/gsd-lite/providers
+cp ~/.claude/gsd-lite/templates/providers/anthropic-compatible.json ~/.config/gsd-lite/providers/myapi.json
+# myapi.json の ANTHROPIC_BASE_URL と、モデル名（ANTHROPIC_DEFAULT_*_MODEL と model）を接続先のドキュメントに合わせて書き換える
+jq '.claude.provider.impl = "myapi"' .gsd-lite/state.json > /tmp/s && mv /tmp/s .gsd-lite/state.json
+git add .gsd-lite/state.json && git commit -m "gsd-lite: impl を myapi で動かす"
+export GSD_THIRD_PARTY_API_KEY='...'   # secret_env の ANTHROPIC_AUTH_TOKEN に書いた変数名で export する
+gsd-lite-loop.sh --check               # provider 行が出て、エラーが無ければよい
+```
+
+キーの渡し方は接続先によって違う。`Authorization: Bearer` で受けるなら `secret_env` の渡す先は `ANTHROPIC_AUTH_TOKEN`
+（サンプルのまま）、`x-api-key` で受けるなら `ANTHROPIC_API_KEY` にする。
 
 ループがそのターンでしていること:
 
