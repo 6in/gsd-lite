@@ -205,14 +205,32 @@ DECISIONS.md でも不採用になっていないものを、最初の AUQ の�
      モデル変更希望があれば Claude は `model.<phase>`、
      Codex は `codex.model.<phase>` / `codex.reasoning_effort.<phase>`、
      OpenCode は `opencode.model.<phase>`（`provider/model`）/ `opencode.variant.<phase>` に設定する。
-   - **Claude の接続先**（Claude のフェーズがあり、ユーザーが Bedrock・他社の Anthropic 互換 API で動かしたいと
-     言ったとき、または state の `claude.provider` が空でないときだけ）: フェーズごとにプロファイル名を
-     `claude.provider.<phase>` に書く（空のフェーズは従来どおり親環境のログイン・トークン）。プロファイルは
-     `~/.config/gsd-lite/providers/<名前>.json`（`GSD_LITE_PROVIDERS_DIR`）にあるものから選ぶ。無ければ
-     インストール済みテンプレートの `providers/` のサンプルから作る手順を示し、URL・リージョン・モデル名は
-     ユーザーに確かめる。**キーの値はプロファイルにも state にも書かない**（`secret_env` には変数の名前だけ。
-     値は起動するシェルで export してもらう）。そのフェーズのモデルはプロファイルの `model` が優先する。
-     保存後の `--check` の `provider` 行を見せ、止まったら表示された理由（変数が空・プロファイルが無い等）を伝える
+   - **Claude の接続先（モデルの選択肢に入れる）**: Claude のフェーズがあれば `gsd-lite-loop.sh --providers` を実行する
+     （1 行 1 プロファイル、タブ区切りで「名前 / モデル / 表示名 / `ok` か `NG: 理由`」。何も出なければこの項は飛ばす）。
+     出たプロファイルは、Claude のフェーズのモデルの選択肢として Claude のモデルと並べて見せる
+     （例: 「DeepSeek V4.1 Flash 1017（接続先 fixstars）」。表示名が空ならモデル名）。
+     - 選び方を AUQ で聞く。プロファイルが 1 つなら「<表示名>（接続先 <名前>）で動かすフェーズ」を multiSelect で
+       （選択肢は Claude で動くフェーズ。今そのプロファイルが入っているフェーズを説明に「現在」と書く）。
+       2 つ以上ならフェーズごとに「Claude（`model.<phase>`）/ 各プロファイル」から選ぶ。
+     - 選ばれたフェーズは `claude.provider.<phase>` にプロファイル名を書く。選ばれなかったフェーズは
+       `claude.provider.<phase>` を**消す**（`del(.claude.provider.<phase>)`。親環境のログインと `model.<phase>` に戻る）。
+       `model.<phase>` は書き換えない（戻したときにそのまま使えるように）。
+     - state はリポジトリで共有される。プロファイルを持たない人のマシンでは、そのフェーズは警告付きで普段の Claude に
+       戻って動く（止まらない）ことを、選ぶときに一言添える。
+     - `claude.provider` はマイルストーンをまたいで残るので、**空でなければ毎回この AUQ を出して**続けるか戻すかを確かめる
+       （一時的に別の接続先で動かしている利用者が、戻し忘れないようにするため）。
+     - `NG: 理由` のプロファイルも選択肢には出し、説明に理由を書く。選ばれたら直し方を伝える
+       （変数が空なら起動するシェルで export、trust が無ければ下記）。
+     - プロファイルが無く、ユーザーが Bedrock・他社の Anthropic 互換 API で動かしたいと言ったら、
+       `~/.config/gsd-lite/providers/<名前>.json`（`GSD_LITE_PROVIDERS_DIR`）に作る手順を示す。
+       インストール済みテンプレートの `providers/` のサンプルから作り、URL・リージョン・モデル名はユーザーに確かめる。
+       **キーの値はプロファイルにも state にも書かない**（`secret_env` には変数の名前だけ。値は起動するシェルで export）。
+       接続先を Claude Code の `settings.json` の形で別フォルダに持っているなら、プロファイルは
+       `{"config_dir": "<そのフォルダ>"}` だけでよい（そのターンだけ `CLAUDE_CONFIG_DIR` になる）。
+     - そのフェーズのモデルは、プロファイルの `model` → `config_dir` の `settings.json` の `model` → `model.<phase>` の順。
+     - `config_dir` のフォルダでは対象リポジトリをまだ trust していないことが多い。`--check` が trust で止まったら、
+       `CLAUDE_CONFIG_DIR=<フォルダ> claude` を対象リポジトリで一度起動して trust を受け入れてもらう。
+     - 保存後の `--check` の `provider` 行・`route` 行を見せ、止まったら表示された理由を伝える
    - **サブエージェントの利用**を AUQ で選ぶ（state の `subagents`。既存値があればそれを既定に）:
      - `auto`（推奨）: impl はタスクの並列サブ作業をサブエージェントで並行実装し、verify は
        レビューとセキュリティチェックを並列化する。ターンあたりのトークン消費は増える。

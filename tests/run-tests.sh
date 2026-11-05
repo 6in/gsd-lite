@@ -1652,10 +1652,23 @@ bad_profile "broken JSON" '{"env": ' 'is not valid JSON'
 printf '%s\n' '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000"}}' > "$GSD_LITE_PROVIDERS_DIR/bad.json"
 "$LOOP" --check > "$TESTROOT/check.log" 2>&1
 assert_eq "count settings named *_TOKENS are not treated as secrets" "$?" "0"
+# プロファイルが無いマシン（その接続先を使えない人）では止めずに普段の Claude で動かす
 commit_state '.claude.provider = {impl: "nowhere"}'
 "$LOOP" --check > "$TESTROOT/check.log" 2>&1
-assert_eq "missing profile rejected" "$?" "6"
-grep -qF "profile not found: $GSD_LITE_PROVIDERS_DIR/nowhere.json" "$TESTROOT/check.log" && ok "missing profile names the path" || ng "missing profile message"
+assert_eq "missing profile falls back instead of failing --check" "$?" "0"
+grep -qF "WARN Claude provider profile 'nowhere' for impl is not on this machine ($GSD_LITE_PROVIDERS_DIR/nowhere.json)" "$TESTROOT/check.log" && ok "missing profile warns with the path" || ng "missing profile WARN ($(cat "$TESTROOT/check.log"))"
+grep -q '^provider  : impl -> nowhere (.* — not on this machine, runs with the normal Claude login)' "$TESTROOT/check.log" && ok "provider line says it falls back" || ng "fallback provider line"
+make_project "$TESTROOT/p51e"
+echo .gsd-lite/provider-seen.log >> .gitignore
+git add -A && git commit -qm "ignore provider log"
+commit_state '.claude.provider.impl="nowhere"'
+CLAUDE_CODE_OAUTH_TOKEN=parent-token GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-provider" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "fallback cycle DONE" "$?" "0"
+assert_eq "impl falls back to the parent login" "$(grep '^/gsd-lite-impl ' .gsd-lite/provider-seen.log | awk '{print $2}' | sort -u)" "oauth=parent-token"
+assert_eq "impl falls back to state.model" "$(grep -o -- '--model [^ ]*' .gsd-lite/stub-args.log | sed -n 3p)" "--model sonnet-stub"
+assert_eq "turns.jsonl has no provider on fallback" "$(jq -r 'select(.phase == "impl") | .provider' .gsd-lite/logs/toy/turns.jsonl | sort -u)" ""
+grep -q "WARN Claude provider profile 'nowhere' for impl" "$TESTROOT/loop-out.log" && ok "turn warns about the fallback" || ng "turn fallback WARN"
+cd "$TESTROOT/p51" || exit 1
 commit_state '.claude.provider = {impl: "../fake"}'
 "$LOOP" --check > "$TESTROOT/check.log" 2>&1
 assert_eq "path-like provider name rejected" "$?" "6"
@@ -1689,6 +1702,96 @@ for sample in "$REPO_DIR"/templates/providers/*.json; do
   GSD_BEDROCK_API_KEY=x GSD_THIRD_PARTY_API_KEY=x "$LOOP" --check > "$TESTROOT/check.log" 2>&1
   assert_eq "sample $name passes --check" "$?" "0"
 done
+
+echo "== Test 52: 接続先プロファイルの config_dir（そのフェーズだけ CLAUDE_CONFIG_DIR を切り替える）=="
+cat > "$TESTROOT/bin/claude-cfgdir" <<'EOF'
+#!/usr/bin/env bash
+cmd=""; a=("$@")
+while [ $# -gt 0 ]; do case "$1" in -p) cmd="$2"; shift 2;; *) shift;; esac; done
+printf '%s cfg=%s oauth=%s\n' "$cmd" "${CLAUDE_CONFIG_DIR:-<unset>}" "${CLAUDE_CODE_OAUTH_TOKEN:-<unset>}" >> .gsd-lite/cfgdir-seen.log
+exec "$(dirname "$0")/claude-happy" "${a[@]}"
+EOF
+chmod +x "$TESTROOT/bin/claude-cfgdir"
+CFG52="$TESTROOT/cfgdir52"
+mkdir -p "$CFG52"
+jq -n '{env: {ANTHROPIC_BASE_URL: "https://x.example", ANTHROPIC_AUTH_TOKEN: "k"}}' > "$CFG52/settings.json"
+printf '{"config_dir": "%s", "model": "gw-model"}\n' "$CFG52" > "$GSD_LITE_PROVIDERS_DIR/gw.json"
+make_project "$TESTROOT/p52"
+echo .gsd-lite/cfgdir-seen.log >> .gitignore
+git add -A && git commit -qm "ignore cfgdir log"
+commit_state '.claude.provider.impl="gw"'
+"$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "config_dir profile passes --check" "$?" "0"
+grep -qF "provider  : impl -> gw ($GSD_LITE_PROVIDERS_DIR/gw.json, config_dir: $CFG52)" "$TESTROOT/check.log" && ok "check shows config_dir" || ng "config_dir line ($(grep provider "$TESTROOT/check.log"))"
+CLAUDE_CODE_OAUTH_TOKEN=parent-token GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-cfgdir" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "config_dir cycle DONE" "$?" "0"
+assert_eq "impl turns use the config_dir without the parent login" \
+  "$(grep '^/gsd-lite-impl ' .gsd-lite/cfgdir-seen.log | sort -u)" "/gsd-lite-impl cfg=$CFG52 oauth=<unset>"
+assert_eq "other turns keep the parent config" \
+  "$(grep -v '^/gsd-lite-impl ' .gsd-lite/cfgdir-seen.log | awk '{print $2, $3}' | sort -u)" "cfg=<unset> oauth=parent-token"
+# trust はフェーズごとの設定フォルダで確かめる
+jq -n --arg d "$PWD" '{projects: {($d): {hasTrustDialogAccepted: true}}}' > "$TESTROOT/home52.json"
+mkdir -p "$TESTROOT/home52" && mv "$TESTROOT/home52.json" "$TESTROOT/home52/.claude.json"
+jq -n --arg d "$PWD" '{projects: {($d): {hasTrustDialogAccepted: false}}}' > "$CFG52/.claude.json"
+CLAUDE_CONFIG_DIR="$TESTROOT/home52" GSD_LITE_CLAUDE_TRUST_CHECK=auto "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "untrusted config_dir fails --check" "$?" "6"
+grep -qF "not trusted by Claude Code ($CFG52/.claude.json)" "$TESTROOT/check.log" && ok "trust message names the config_dir" || ng "trust message ($(head -3 "$TESTROOT/check.log"))"
+grep -qF "CLAUDE_CONFIG_DIR=$CFG52 claude" "$TESTROOT/check.log" && ok "trust hint starts claude with the config_dir" || ng "trust hint"
+jq --arg d "$PWD" '.projects[$d].hasTrustDialogAccepted = true' "$CFG52/.claude.json" > "$TESTROOT/t52" && mv "$TESTROOT/t52" "$CFG52/.claude.json"
+CLAUDE_CONFIG_DIR="$TESTROOT/home52" GSD_LITE_CLAUDE_TRUST_CHECK=auto "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "trusted config_dir passes --check" "$?" "0"
+assert_eq "trust lines per config folder" "$(grep -c '^trust     : accepted' "$TESTROOT/check.log")" "2"
+grep -qF "trust     : accepted (Claude Code allowlist active) [config_dir: $CFG52]" "$TESTROOT/check.log" && ok "trust line names the config_dir" || ng "trust config_dir line"
+# 接続先とキーは config_dir の settings.json でも数える。だめな形は止める
+cfg_case(){ # cfg_case <説明> <settings.json か "-"（置かない）> <プロファイル JSON> <期待する終了コード> [メッセージの一部]
+  rm -f "$CFG52/settings.json"
+  [ "$2" = - ] || printf '%s\n' "$2" > "$CFG52/settings.json"
+  printf '%s\n' "$3" > "$GSD_LITE_PROVIDERS_DIR/gw.json"
+  "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+  assert_eq "$1" "$?" "$4"
+  [ -z "${5:-}" ] || { grep -qF -- "$5" "$TESTROOT/check.log" && ok "$1 message" || ng "$1 message ($(cat "$TESTROOT/check.log"))"; }
+}
+P52="{\"config_dir\": \"$CFG52\"}"
+cfg_case "base URL in settings without a key" '{"env": {"ANTHROPIC_BASE_URL": "https://x.example"}}' "$P52" 6 'would send the subscription login'
+cfg_case "apiKeyHelper counts as a key" '{"env": {"ANTHROPIC_BASE_URL": "https://x.example"}, "apiKeyHelper": "/bin/echo k"}' "$P52" 0
+cfg_case "key from secret_env with a base URL in settings" '{"env": {"ANTHROPIC_BASE_URL": "https://x.example"}}' \
+  "{\"config_dir\": \"$CFG52\", \"secret_env\": {\"ANTHROPIC_AUTH_TOKEN\": \"GW52_KEY\"}}" 6 'variable GW52_KEY'
+cfg_case "config_dir with its own login (no settings.json)" - "$P52" 0
+cfg_case "broken settings.json" '{"env": ' "$P52" 6 'is not a valid JSON object'
+cfg_case "missing config_dir" - "{\"config_dir\": \"$TESTROOT/nowhere52\"}" 6 'is not a directory'
+cfg_case "relative config_dir" - '{"config_dir": "cfg"}' 6 'must be an absolute path'
+cfg_case "env.CLAUDE_CONFIG_DIR" - "{\"env\": {\"CLAUDE_CONFIG_DIR\": \"$CFG52\"}}" 6 'use config_dir instead'
+# プロファイルに model が無ければ config_dir の settings.json の model を使う
+cfg_case "settings model" '{"env": {"ANTHROPIC_BASE_URL": "https://x.example", "ANTHROPIC_AUTH_TOKEN": "k"}, "model": "gw-settings-model"}' "$P52" 0
+"$LOOP" --status | grep -q '^route     : impl -> claude (model: gw-settings-model, provider: gw)' && ok "settings.json model is used" || ng "settings model route"
+"$LOOP" --status | grep -q '^route     : plan -> claude (model: opus-stub)' && ok "other phases keep state.model" || ng "state model route"
+# config_dir に .claude.json がまだ無ければ trust していない扱いで止める
+rm -f "$CFG52/.claude.json"
+CLAUDE_CONFIG_DIR="$TESTROOT/home52" GSD_LITE_CLAUDE_TRUST_CHECK=auto "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "config_dir without .claude.json fails the trust check" "$?" "6"
+# config_dir は ${変数名} で環境変数から渡せる
+printf '%s\n' '{"env": {"ANTHROPIC_BASE_URL": "https://x.example", "ANTHROPIC_AUTH_TOKEN": "k"}, "model": "gw-settings-model", "modelPicker": {"options": [{"model": "gw-settings-model", "label": "GW Model"}]}}' > "$CFG52/settings.json"
+printf '%s\n' '{"config_dir": "${GW52_DIR}"}' > "$GSD_LITE_PROVIDERS_DIR/gw.json"
+GW52_DIR="$CFG52" "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "config_dir from a variable passes --check" "$?" "0"
+grep -qF "provider  : impl -> gw ($GSD_LITE_PROVIDERS_DIR/gw.json, config_dir: $CFG52)" "$TESTROOT/check.log" && ok "variable config_dir is expanded" || ng "variable config_dir line"
+env -u GW52_DIR "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "unset config_dir variable fails --check" "$?" "6"
+grep -qF "variable GW52_DIR (config_dir of Claude provider 'gw') is unset" "$TESTROOT/check.log" && ok "unset config_dir variable is named" || ng "unset variable message ($(cat "$TESTROOT/check.log"))"
+GW52_DIR=rel "$LOOP" --check > "$TESTROOT/check.log" 2>&1
+assert_eq "variable holding a relative path fails --check" "$?" "6"
+make_project "$TESTROOT/p52b"
+echo .gsd-lite/cfgdir-seen.log >> .gitignore
+git add -A && git commit -qm "ignore cfgdir log"
+commit_state '.claude.provider.impl="gw"'
+GW52_DIR="$CFG52" GSD_LITE_CLAUDE_BIN="$TESTROOT/bin/claude-cfgdir" "$LOOP" > "$TESTROOT/loop-out.log" 2>&1
+assert_eq "impl turns get the expanded config_dir" "$(grep '^/gsd-lite-impl ' .gsd-lite/cfgdir-seen.log | awk '{print $2}' | sort -u)" "cfg=$CFG52"
+# --providers: discuss がモデルの選択肢に使う一覧（どこからでも）
+printf '%s\n' '{"env": {"AWS_REGION": "x"}}' > "$GSD_LITE_PROVIDERS_DIR/broken52.json"
+out=$(cd "$TESTROOT" && GW52_DIR="$CFG52" "$LOOP" --providers)
+assert_eq "--providers lists the profile with model and label" "$(echo "$out" | grep '^gw	')" "gw	gw-settings-model	GW Model	ok"
+echo "$out" | grep -q '^broken52			NG: .*sets no endpoint' && ok "--providers shows why a profile cannot be used" || ng "--providers NG line ($out)"
+rm -f "$GSD_LITE_PROVIDERS_DIR/broken52.json"
 unset GSD_LITE_PROVIDERS_DIR
 
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
