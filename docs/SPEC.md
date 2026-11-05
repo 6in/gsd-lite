@@ -53,6 +53,9 @@
 > ループ本体追補（2026-10-28）: Claude のフェーズごとに接続先プロファイルを選べる（`state.claude.provider.<phase>` に
 > 名前、`~/.config/gsd-lite/providers/<名前>.json` に env / secret_env / model / limit_pattern、秘密の値は環境変数）。
 > 一部のフェーズだけを Bedrock・他社の Anthropic 互換 API に向けるため（§7「接続先プロファイル」）。
+> 2026-11-05: プロファイルの `config_dir` で、そのフェーズだけ `CLAUDE_CONFIG_DIR` を切り替えられる（接続先を Claude Code の
+> `settings.json` の形で持つ場合。`${変数名}` で環境変数から渡せる。trust はそのフォルダで確かめる）。`--providers` で一覧を出し、
+> discuss はそれを Claude のフェーズのモデルの選択肢に並べる（一時的に別の接続先で動かし、戻しやすくするため）。
 > achat 追補（2026-11-01、Issue #2）: 学びをリポジトリ・マシンをまたいで共有するため、achat（agentmem MCP。作業の記録・
 > 記憶・掲示板）を任意でつなぐ。state の `agentmem`（`url` / `project` / `shared_project`）と環境変数 `AGENTMEM_TOKEN` が
 > あるターンにだけ、ループが MCP サーバー `agentmem`（対象リポジトリの project）と `agentmem-gsd`（gsd-lite を使う全リポジトリで
@@ -549,9 +552,17 @@ done
   モデルの対応など）を外し、`env` をそのまま、`secret_env`（渡す先 → 値を持つ変数の名前）を間接参照で export する。
   `model` は `state.model.<phase>` より優先、`limit_pattern` は `GSD_LITE_LIMIT_PATTERN` に足して利用上限の判定に使う。
   トークンの切り替えと利用枠の記録はしない（`turns.jsonl` は `provider` を記録）。`--check`・起動時・各ターンの前に
-  検証し、だめなら終了コード 6: ファイルが無い / 形が違う / 秘密に見える名前が `env` にある / `secret_env` の変数が空 /
+  検証し、だめなら終了コード 6: 形が違う / 秘密に見える名前が `env` にある / `secret_env` の変数が空 /
   接続先も認証も決めていない（サブスクリプションのログインに戻る）/ `ANTHROPIC_BASE_URL` に
-  `ANTHROPIC_AUTH_TOKEN|API_KEY` が無い（保存されたログインがその URL に送られる）。値は表示しない
+  `ANTHROPIC_AUTH_TOKEN|API_KEY` が無い（保存されたログインがその URL に送られる）。値は表示しない。
+  `config_dir`（絶対パスか `~/`。`${変数名}` は環境変数で置き換え、空なら終了コード 6）を書くと、そのターンだけ `CLAUDE_CONFIG_DIR` をそのフォルダにする（Claude Code の
+  `settings.json` の形で接続先を持つ場合）。接続先・キーの検証はプロファイルと `<config_dir>/settings.json` の `env` を
+  合わせて行い、`apiKeyHelper` もキーとして数え、接続先を書かない形（そのフォルダのログイン）も受け付ける。
+  `env.CLAUDE_CONFIG_DIR` は拒否。モデルはプロファイルの `model` → `settings.json` の `model` → `state.model.<phase>`。
+  trust の確認（§7 の trust）はフェーズごとの設定フォルダの `.claude.json` で行い、`config_dir` に `.claude.json` が
+  無ければ未 trust として止める。プロファイルのファイルがこのマシンに無いときは止めずに WARN を出し、そのフェーズを
+  親環境のログインと `state.model.<phase>` で動かす（state はリポジトリで共有されるが、接続先を使えない人もいるため。
+  `--status` の `provider` 行は「not on this machine」、`turns.jsonl` の `provider` は空）
 - **使用量の記録**: Claude のターンは `--output-format stream-json --verbose` で起動し、`result`
   イベントから `usage` / `total_cost_usd` / `num_turns` / `permission_denials` を、`rate_limit_event` から
   利用枠の使用率を取り出して `turns.jsonl` に足す（Codex はログ末尾の `tokens used` の合計のみ）。

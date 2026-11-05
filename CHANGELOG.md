@@ -7,6 +7,22 @@ gsd-lite の利用者から見た変更を、新しい順に記録する。バ�
 - 反映: ループ本体（`bin/gsd-lite-loop.sh`）の変更は `install.sh` で入れ直し、ループを再起動したときから効く。
   スキル・雛形の変更は、既存プロジェクトでは `gsd-lite-init` のスキル更新モードで取り込む
 
+## 2026-11-05
+
+### 追加
+- 接続先プロファイルの `config_dir`。書いたフェーズのターンだけ `CLAUDE_CONFIG_DIR` をそのフォルダにし、接続先・キー・
+  モデルをそこの `settings.json` から読ませる。`--check` はプロファイルと `settings.json` を合わせて検証し
+  （`apiKeyHelper` もキーとして数える）、trust はそのフォルダの `.claude.json` で確かめる（無ければ止める）。
+  `--status` / `--check` の `provider` 行に `config_dir`、`trust` 行は設定フォルダごとに出る。`config_dir` には
+  `${変数名}` を書け、起動するシェルの環境変数で置き換える
+- `gsd-lite-loop.sh --providers`: 接続先プロファイルの一覧（名前・モデル・表示名・使えるか）
+- discuss がフェーズごとのモデルを決めるときに、接続先プロファイルを Claude のモデルと並べて選択肢に出す。選ばなかった
+  フェーズの `claude.provider` は消し、`claude.provider` が入っている間は毎回続けるか確かめる
+
+### 変更
+- state の `claude.provider` に書かれたプロファイルがこのマシンに無いときは、止めずに WARN を出してそのフェーズを普段の
+  Claude（親環境のログインと `model.<phase>`）で動かす（接続先を使えない人が同じリポジトリでループを回せるように）
+
 ## 2026-11-01
 
 ### 追加

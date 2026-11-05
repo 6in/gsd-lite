@@ -95,6 +95,7 @@ gsd-lite-loop.sh --status   # 1 回表示
 gsd-lite-loop.sh --watch    # 簡易 TUI: 状態・PLAN のタスク・実行中ターンのログを数秒ごとに再描画
 gsd-lite-loop.sh --where    # 作業場所（mode / milestone_dir / state / target / slug）を key=value で表示
 gsd-lite-loop.sh --tokens   # トークンごとの利用枠（5 時間 / 7 日の使用率とリセットまで）。どのディレクトリからでも可
+gsd-lite-loop.sh --providers # Claude の接続先プロファイルの一覧（名前・モデル・表示名・使えるか）。どのディレクトリからでも可
 ```
 
 `--status` の `verify` 行は差し戻し回数（`verify_round`）/ 上限と、次の verify が何ラウンド目かを出す
@@ -456,6 +457,65 @@ gsd-lite-loop.sh --check               # provider 行が出て、エラーが無
 
 キーの渡し方は接続先によって違う。`Authorization: Bearer` で受けるなら `secret_env` の渡す先は `ANTHROPIC_AUTH_TOKEN`
 （サンプルのまま）、`x-api-key` で受けるなら `ANTHROPIC_API_KEY` にする。
+
+### どのフェーズを接続先で動かすかを選ぶ
+
+discuss でフェーズごとのモデルを決めるときに、`~/.config/gsd-lite/providers/` のプロファイルが Claude のモデルと並んで
+選択肢に出る（例: 「DeepSeek V4.1 Flash 1017（接続先 fixstars）」）。選んだフェーズには `claude.provider.<phase>` が入り、
+選ばなかったフェーズからは消える（`model.<phase>` はそのまま残るので、戻せば元のモデルで動く）。`claude.provider` が
+入っている間は、次のマイルストーンの discuss でも続けるか戻すかを毎回聞く。
+
+`claude.provider` は state に入ってリポジトリで共有されるが、プロファイルはマシンごとにある。プロファイルを持たない人
+（その接続先を使えない人）がループを回すと、そのフェーズは警告を出して普段の Claude（親環境のログインと `model.<phase>`）で
+動く。プロファイルはあるのに変数が空・形が違うなど、設定の誤りは今までどおり止める。
+
+一覧は `gsd-lite-loop.sh --providers` でも見られる（名前・モデル・表示名・使えるか。表示名は `config_dir` の
+`settings.json` の `modelPicker` の `label`）。discuss を通さずに切り替えるなら state を直接書いてコミットする:
+
+```bash
+jq '.claude.provider.impl = "myapi"' .gsd-lite/state.json > /tmp/s && mv /tmp/s .gsd-lite/state.json   # impl を接続先で
+jq 'del(.claude.provider.impl)' .gsd-lite/state.json > /tmp/s && mv /tmp/s .gsd-lite/state.json        # 元に戻す
+git add .gsd-lite/state.json && git commit -m "gsd-lite: impl の接続先を切り替える"
+```
+
+### 設定フォルダごと切り替える（`config_dir`）
+
+接続先の設定を Claude Code の `settings.json` の形で持っているなら、プロファイルに `config_dir` だけを書いてもよい。
+そのフェーズのターンだけ `CLAUDE_CONFIG_DIR` がそのフォルダになり、Claude Code は `~/.claude` の代わりにそこの
+`settings.json`（`env` / `apiKeyHelper` / `model`）・ログイン・trust を使う。
+
+```bash
+mkdir -p ~/claude-myapi
+cat > ~/claude-myapi/settings.json <<'EOF'
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.example.com",
+    "ANTHROPIC_AUTH_TOKEN": "<キー>",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "<接続先のモデル名>",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "<接続先のモデル名>",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<接続先の軽いモデル名>"
+  },
+  "model": "<接続先のモデル名>"
+}
+EOF
+chmod 600 ~/claude-myapi/settings.json            # キーを書いたら本人だけが読めるようにする
+echo '{"config_dir": "~/claude-myapi"}' > ~/.config/gsd-lite/providers/myapi.json
+jq '.claude.provider.impl = "myapi"' .gsd-lite/state.json > /tmp/s && mv /tmp/s .gsd-lite/state.json
+git add .gsd-lite/state.json && git commit -m "gsd-lite: impl を myapi で動かす"
+CLAUDE_CONFIG_DIR=~/claude-myapi claude          # 対象リポジトリで一度起動し、trust ダイアログを受け入れて終了する
+gsd-lite-loop.sh --check                          # provider 行に config_dir、trust 行がフォルダごとに出る
+```
+
+- `config_dir` は絶対パスか `~/` で始める。`${変数名}` を書くと起動するシェルの環境変数で置き換える
+  （例: `{"config_dir": "${MYAPI_CLAUDE_DIR}"}` と `export MYAPI_CLAUDE_DIR=~/claude-myapi`。マシンや人によって
+  フォルダが違うときに使う。変数が空なら `--check` で止まる）。`env.CLAUDE_CONFIG_DIR` には書かない（`--check` で止まる）
+- 接続先とキーの検証は、プロファイルと `settings.json` の `env` を合わせて行う。`apiKeyHelper` もキーとして数える。
+  接続先を書かない `settings.json`（そのフォルダで別のアカウントにログインして使う形）も受け付ける
+- モデルは、プロファイルの `model` → `settings.json` の `model` → `state.model.<phase>` の順に決まる。
+  サブエージェントは `opus` / `sonnet` / `haiku` の別名でモデルを頼むので、`ANTHROPIC_DEFAULT_*_MODEL` も書いておく
+- trust はそのフォルダの `.claude.json` で確かめる。まだ無ければ trust していない扱いで止める
+- `~/.claude` がまるごと置き換わるので、全体の `CLAUDE.md`・`~/.claude/skills`・プラグイン・ユーザー単位の MCP・フックは
+  そのターンでは読まれない（プロジェクトの `.claude/` は読まれる）。要るものはフォルダにコピーするかリンクを張る
 
 ループがそのターンでしていること:
 

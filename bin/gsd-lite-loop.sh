@@ -11,6 +11,8 @@
 #   gsd-lite-loop.sh --watch    # 進捗・タスク・実行中ログを数秒ごとに再描画する簡易 TUI（q で終了）
 #   gsd-lite-loop.sh --watch-once # --watch の 1 画面ぶんを出力して終了（非対話・テスト用）
 #   gsd-lite-loop.sh --tokens   # トークンごとの利用枠（5 時間 / 7 日の使用率とリセットまでの時間）を表示（どこからでも可）
+#   gsd-lite-loop.sh --providers # Claude の接続先プロファイルの一覧（名前・モデル・表示名・使えるか）をタブ区切りで表示（どこからでも可）。
+#                               # discuss がフェーズごとのモデルの選択肢に使う
 #   gsd-lite-loop.sh --where    # 作業場所の解決結果（mode / milestone_dir / state / target / slug）を key=value で表示。
 #                               # スキルが最初に 1 回呼び、以降はその値をリテラルで使う（Bash ツールはコール間で変数を保持しない）
 #
@@ -29,7 +31,8 @@
 #   GSD_LITE_CLAUDE_BIN        claude バイナリの上書き（テスト用スタブ差し込み）
 #   GSD_LITE_PERMISSION_MODE   claude -p の --permission-mode（デフォルト acceptEdits）
 #   GSD_LITE_CLAUDE_TRUST_CHECK auto / skip（デフォルト auto）。Claude を使うフェーズがあれば、このディレクトリが
-#                              Claude Code で trust 済み（~/.claude.json の projects[<cwd>].hasTrustDialogAccepted）か
+#                              Claude Code で trust 済み（~/.claude.json の projects[<cwd>].hasTrustDialogAccepted。
+#                              CLAUDE_CONFIG_DIR・接続先プロファイルの config_dir があればそのフォルダの .claude.json）か
 #                              起動前に確認する。未 trust だと claude -p は .claude/settings.json の allowlist を全部
 #                              無視するので、無人ターンが権限拒否で無進捗になる
 #   GSD_LITE_INSTRUCTIONS_CHECK auto / skip（デフォルト auto）。このディレクトリの指示ファイルが、使うエンジンに
@@ -47,7 +50,9 @@
 #                              ${XDG_CONFIG_HOME:-~/.config}/gsd-lite/providers）。state.claude.provider.<phase> に
 #                              名前を書いたフェーズだけ、<名前>.json の env / secret_env（渡す先の変数名 → 値を持つ
 #                              変数名）でそのターンの Claude を Bedrock・他社の Anthropic 互換 API 等に向ける。
-#                              親環境の認証・接続先の変数は外し、トークンの切り替えも使わない（サンプルは templates/providers/）
+#                              親環境の認証・接続先の変数は外し、トークンの切り替えも使わない（サンプルは templates/providers/）。
+#                              config_dir を書くと、そのターンだけ CLAUDE_CONFIG_DIR をそのフォルダにする（settings.json の
+#                              env・apiKeyHelper・ログイン・trust をそのフォルダから読む）
 #   GSD_LITE_TOKEN_PICK        usage / round-robin（デフォルト usage）。usage なら利用枠の使用率
 #                              （5 時間と 7 日の大きい方。リセット済みの枠は 0）が最も低いトークンを選び、
 #                              同率なら従来の順番で回す。round-robin なら使用率を見ずに順番どおり
@@ -496,24 +501,61 @@ model_for() { # model_for <engine> <phase> — そのフェーズに渡すモデ
     codex) printf '%s\n' "${GSD_LITE_CODEX_MODEL:-$(jq -r --arg phase "$2" '.codex.model[$phase] // empty' "$STATE")}" ;;
     opencode) printf '%s\n' "${GSD_LITE_OPENCODE_MODEL:-$(jq -r --arg phase "$2" '.opencode.model[$phase] // empty' "$STATE")}" ;;
     *)
-      # 接続先プロファイルの model は state.model より優先する（state の既定は Anthropic API のモデル名のため）
-      local provider
+      # 接続先プロファイルの model は state.model より優先する（state の既定は Anthropic API のモデル名のため）。
+      # プロファイルに無ければ config_dir の settings.json の model を使う
+      local provider dir
       provider=$(provider_for "$2")
       if [ -n "$provider" ] && [ -f "$(provider_file "$provider")" ]; then
         jq -r '.model // empty' "$(provider_file "$provider")" 2>/dev/null | grep . && return 0
+        dir=$(provider_config_dir "$provider")
+        if [ -n "$dir" ]; then jq -r '.model // empty | strings' "$dir/settings.json" 2>/dev/null | grep . && return 0; fi
       fi
       jq -r --arg phase "$2" '.model[$phase] // empty' "$STATE" ;;
   esac
 }
 
-provider_for() { # provider_for <phase> — そのフェーズの Claude の接続先プロファイル名（空なら親環境のまま）
+provider_name_raw() { # provider_name_raw <phase> — state に書かれた接続先プロファイル名（Claude のフェーズだけ）
   [ "$(engine_for "$1")" = claude ] || return 0
   jq -r --arg phase "$1" '.claude.provider[$phase] // empty | tostring' "$STATE"
 }
 
+provider_for() { # provider_for <phase> — そのフェーズで使う接続先プロファイル名（空なら親環境のまま）。
+  # state はリポジトリで共有されるので、プロファイルを持たないマシン（その接続先を使えない人）では使わずに
+  # 普段の Claude で動かす（provider_fallback_warn が知らせる）。名前の形が不正なら check_provider に止めさせる
+  local name
+  name=$(provider_name_raw "$1")
+  case "$name" in ''|*[!A-Za-z0-9_-]*) printf '%s\n' "$name"; return 0 ;; esac
+  [ -f "$(provider_file "$name")" ] && printf '%s\n' "$name"
+  return 0
+}
+
+provider_fallback_warn() { # provider_fallback_warn <phase> — プロファイルが無くて普段の Claude に戻すなら WARN
+  local name
+  name=$(provider_name_raw "$1")
+  [ -n "$name" ] && [ -z "$(provider_for "$1")" ] || return 0
+  echo "gsd-lite: WARN Claude provider profile '$name' for $1 is not on this machine ($(provider_file "$name")) — $1 runs with the normal Claude login and model.$1" >&2
+}
+
 provider_file() { printf '%s/%s.json\n' "$PROVIDERS_DIR" "$1"; }
 
-# プロファイルの形の検証。問題があれば 1 行のメッセージを出す（無ければ何も出さない）
+provider_config_dir_raw() { jq -r '.config_dir // empty | strings' "$(provider_file "$1")" 2>/dev/null; }
+
+provider_config_dir_vars() { # provider_config_dir_vars <name> — config_dir の中の ${変数名} を 1 行ずつ
+  provider_config_dir_raw "$1" | grep -o '\${[A-Za-z_][A-Za-z0-9_]*}' | tr -d '${}' | awk '!seen[$0]++'
+}
+
+provider_config_dir() { # provider_config_dir <name> — プロファイルの config_dir（${変数名} と先頭の ~/ を展開）。無ければ空
+  local dir var
+  dir=$(provider_config_dir_raw "$1")
+  for var in $(provider_config_dir_vars "$1"); do
+    dir=${dir//"\${$var}"/"${!var:-}"}
+  done
+  case "$dir" in \~/*) dir="$HOME/${dir#\~/}" ;; esac
+  printf '%s\n' "$dir"
+}
+
+# プロファイルの形の検証。問題があれば 1 行のメッセージを出す（無ければ何も出さない）。
+# $settings は config_dir の settings.json（無ければ {}）。その env と apiKeyHelper も接続先・キーとして数える
 PROVIDER_CHECK_JQ='
   def names: test("^[A-Za-z_][A-Za-z0-9_]*$");
   # 秘密に見える名前。MAX_OUTPUT_TOKENS のような「TOKENS」は数の設定なので含めない
@@ -523,26 +565,47 @@ PROVIDER_CHECK_JQ='
   elif (.env // {} | strmap | not) then "env must map variable names to strings"
   elif (.secret_env // {} | strmap | not) then "secret_env must map variable names to variable names"
   elif (.secret_env // {} | all(.[]; names) | not) then "secret_env values must be variable names (the secret itself goes in your environment)"
-  elif ((.model // "") | type != "string") or ((.limit_pattern // "") | type != "string") then "model and limit_pattern must be strings"
+  elif ((.model // "") | type != "string") or ((.limit_pattern // "") | type != "string") or ((.config_dir // "") | type != "string")
+  then "model, limit_pattern and config_dir must be strings"
+  elif (.env // {} | has("CLAUDE_CONFIG_DIR")) then "use config_dir instead of env.CLAUDE_CONFIG_DIR"
   elif (.env // {} | keys | map(select(secretish)) | length > 0) then
     "env has \(.env | keys | map(select(secretish)) | join(", ")) — move secrets to secret_env (value = the name of the variable holding it)"
-  else ((.env // {}) + (.secret_env // {}) | keys) as $k
+  else ((.env // {}) + (.secret_env // {}) + ($settings.env // {}) | keys) as $k
+    | (($settings.apiKeyHelper // "") != "") as $helper
     | if ($k | any(. == "ANTHROPIC_BASE_URL" or . == "ANTHROPIC_API_KEY" or . == "ANTHROPIC_AUTH_TOKEN"
           or . == "CLAUDE_CODE_USE_BEDROCK" or . == "CLAUDE_CODE_USE_VERTEX" or . == "CLAUDE_CODE_USE_FOUNDRY") | not)
-      then "sets no endpoint or credential (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY / CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX / CLAUDE_CODE_USE_FOUNDRY) — the turn would fall back to the subscription login"
-      elif ($k | index("ANTHROPIC_BASE_URL")) and ($k | any(. == "ANTHROPIC_AUTH_TOKEN" or . == "ANTHROPIC_API_KEY") | not)
-      then "ANTHROPIC_BASE_URL without ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY in secret_env would send the subscription login to that URL"
+          and ($helper | not) and ((.config_dir // "") == "")
+      then "sets no endpoint or credential (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY / CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX / CLAUDE_CODE_USE_FOUNDRY / config_dir) — the turn would fall back to the subscription login"
+      elif ($k | index("ANTHROPIC_BASE_URL")) and ($k | any(. == "ANTHROPIC_AUTH_TOKEN" or . == "ANTHROPIC_API_KEY") | not) and ($helper | not)
+      then "ANTHROPIC_BASE_URL without ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY (secret_env, or env / apiKeyHelper in the config_dir settings.json) would send the subscription login to that URL"
       else empty end
   end'
 
 check_provider() { # check_provider <name> — プロファイルが使える状態か（値は表示しない）。だめなら die
-  local name=$1 file msg src
+  local name=$1 file msg src dir settings='{}'
   case "$name" in
     ''|*[!A-Za-z0-9_-]*) die "invalid Claude provider name: '$name' (state.claude.provider; letters, digits, - and _)" ;;
   esac
   file=$(provider_file "$name")
   [ -f "$file" ] || die "Claude provider profile not found: $file (state.claude.provider uses '$name'; samples: templates/providers/ in gsd-lite)"
-  msg=$(jq -r "$PROVIDER_CHECK_JQ" "$file" 2>&1) || die "Claude provider profile $file is not valid JSON"
+  jq -e . "$file" >/dev/null 2>&1 || die "Claude provider profile $file is not valid JSON"
+  jq -e '(.config_dir // "") | type == "string"' "$file" >/dev/null || die "Claude provider profile $file: config_dir must be a string"
+  for src in $(provider_config_dir_vars "$name"); do
+    [ -n "${!src:-}" ] || die "variable $src (config_dir of Claude provider '$name') is unset or empty — export it before starting"
+  done
+  dir=$(provider_config_dir "$name")
+  if [ -n "$(provider_config_dir_raw "$name")" ]; then
+    case "$dir" in
+      /*) ;;
+      *) die "config_dir of Claude provider '$name' must be an absolute path, ~/... or \${VAR} holding one (got: $dir)" ;;
+    esac
+    [ -d "$dir" ] || die "config_dir of Claude provider '$name' is not a directory: $dir"
+    if [ -f "$dir/settings.json" ]; then
+      settings=$(jq -c 'if type == "object" then . else error("not an object") end' "$dir/settings.json" 2>/dev/null) ||
+        die "$dir/settings.json (config_dir of Claude provider '$name') is not a valid JSON object"
+    fi
+  fi
+  msg=$(jq -r --argjson settings "$settings" "$PROVIDER_CHECK_JQ" "$file" 2>&1) || die "Claude provider profile $file: $msg"
   [ -z "$msg" ] || die "Claude provider profile $file: $msg"
   for src in $(jq -r '.secret_env // {} | .[]' "$file"); do
     [ -n "${!src:-}" ] || die "variable $src (secret_env of Claude provider '$name') is unset or empty — export it before starting"
@@ -560,13 +623,41 @@ apply_provider() { # apply_provider <name> — ターンのサブシェルの中
   while IFS= read -r -d '' key && IFS= read -r -d '' src; do
     export "$key=${!src}"
   done < <(jq -j '.secret_env // {} | to_entries[] | "\(.key)\u0000\(.value)\u0000"' "$file")
+  # config_dir: そのターンの Claude Code は ~/.claude の代わりにこのフォルダの settings.json・ログイン・trust を使う
+  value=$(provider_config_dir "$1")
+  [ -z "$value" ] || export CLAUDE_CONFIG_DIR="$value"
+}
+
+providers_report() { # --providers: 1 行 1 プロファイル「名前<TAB>モデル<TAB>表示名<TAB>ok か NG: 理由」
+  local file name model label dir status
+  for file in "$PROVIDERS_DIR"/*.json; do
+    [ -f "$file" ] || continue
+    name=$(basename "$file" .json)
+    dir=$(provider_config_dir "$name")
+    model=$(jq -r '.model // empty | strings' "$file" 2>/dev/null)
+    if [ -z "$model" ] && [ -n "$dir" ]; then model=$(jq -r '.model // empty | strings' "$dir/settings.json" 2>/dev/null); fi
+    # 表示名は config_dir の settings.json の modelPicker で、そのモデルの行に付けた label
+    label=
+    if [ -n "$model" ] && [ -n "$dir" ]; then
+      label=$(jq -r --arg m "$model" '[.modelPicker.options[]? | select(.model == $m) | .label // empty | strings][0] // empty' \
+        "$dir/settings.json" 2>/dev/null)
+    fi
+    if status=$( (check_provider "$name") 2>&1 ); then status=ok; else status="NG: ${status#gsd-lite-loop: }"; fi
+    printf '%s\t%s\t%s\t%s\n' "$name" "$model" "$label" "$status"
+  done
 }
 
 provider_summary() { # --status / --check 用: 接続先プロファイルを使うフェーズごとに 1 行（使わなければ何も出さない）
-  local p name
+  local p name dir
   for p in $PHASES; do
-    name=$(provider_for "$p")
-    [ -z "$name" ] || echo "provider  : $p -> $name ($(provider_file "$name")$([ -f "$(provider_file "$name")" ] || echo ' — MISSING'))"
+    name=$(provider_name_raw "$p")
+    [ -n "$name" ] || continue
+    if [ -n "$(provider_for "$p")" ] && [ -f "$(provider_file "$name")" ]; then
+      dir=$(provider_config_dir "$name")
+      echo "provider  : $p -> $name ($(provider_file "$name")${dir:+, config_dir: $dir})"
+    else
+      echo "provider  : $p -> $name ($(provider_file "$name") — not on this machine, runs with the normal Claude login)"
+    fi
   done
 }
 
@@ -607,6 +698,7 @@ check_config() {
       die "missing $skill_dir/gsd-lite-$check_phase/SKILL.md (update project skills before starting)"
     check_provider_name=$(provider_for "$check_phase")
     [ -z "$check_provider_name" ] || check_provider "$check_provider_name"
+    provider_fallback_warn "$check_phase"
   done
   check_git_identity
   check_target
@@ -870,43 +962,59 @@ where() { # 作業場所の解決結果を key=value で表示（スキル向け
   echo "agentmem_servers=$names"
 }
 
-claude_config_file() { printf '%s\n' "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"; }
+claude_config_file() { printf '%s\n' "${1:-${CLAUDE_CONFIG_DIR:-$HOME}}/.claude.json"; }
 
-claude_trusted() { # 0=trust 済み / 1=未 trust / 2=判定できない（設定ファイルなし）
+claude_trusted() { # claude_trusted [設定フォルダ] — 0=trust 済み / 1=未 trust / 2=判定できない（設定ファイルなし）
   local cfg
-  cfg=$(claude_config_file)
-  [ -f "$cfg" ] || return 2
+  cfg=$(claude_config_file "${1:-}")
+  # config_dir に .claude.json が無いのは、そのフォルダでまだ一度も trust していないということ
+  [ -f "$cfg" ] || { [ -n "${1:-}" ] && return 1; return 2; }
   [ "$(jq -r --arg d "$PWD" '.projects[$d].hasTrustDialogAccepted // false' "$cfg" 2>/dev/null)" = true ]
+}
+
+claude_config_dirs() { # Claude で動くフェーズが使う設定フォルダを重複なしで 1 行ずつ（空行 = 親環境のまま）
+  local p name
+  for p in $PHASES; do
+    [ "$(engine_for "$p")" = claude ] || continue
+    name=$(provider_for "$p")
+    if [ -n "$name" ] && [ -f "$(provider_file "$name")" ]; then provider_config_dir "$name"; else echo; fi
+  done | awk '!seen[$0]++'
 }
 
 check_claude_trust() {
   # claude -p は、そのディレクトリで trust ダイアログを受け入れていないと .claude/settings.json の
   # permissions.allow を「Ignoring N permissions.allow entries ... this workspace has not been trusted」として
-  # 全部無視する。無人ターンでは権限拒否に応答できないので、起動前に止めて対処を案内する
-  local uses_claude=0 p
+  # 全部無視する。無人ターンでは権限拒否に応答できないので、起動前に止めて対処を案内する。
+  # 接続先プロファイルの config_dir を使うフェーズは、そのフォルダの .claude.json で判定する
+  local dir cfg
   [ "${GSD_LITE_CLAUDE_TRUST_CHECK:-auto}" = skip ] && return 0
-  for p in $PHASES; do
-    [ "$(engine_for "$p")" = claude ] && uses_claude=1
-  done
-  [ "$uses_claude" -eq 1 ] || return 0
-  claude_trusted
-  case $? in
-    0) return 0 ;;
-    2) echo "gsd-lite: WARN $(claude_config_file) not found — cannot verify that this workspace is trusted by Claude Code" >&2; return 0 ;;
-  esac
-  die "this workspace is not trusted by Claude Code, so claude -p will ignore every permissions.allow entry in .claude/settings.json (unattended turns then stall on permission prompts).
-  対処（どちらか）: (a) このディレクトリで対話の claude を一度起動して trust ダイアログを受け入れる（bypass モードで起動した場合はダイアログが出ないので (b)）
-              (b) claude を終了した状態で: jq --arg d \"$PWD\" '.projects[\$d].hasTrustDialogAccepted = true' $(claude_config_file) > /tmp/claude.json && mv /tmp/claude.json $(claude_config_file)
+  while IFS= read -r dir; do
+    cfg=$(claude_config_file "$dir")
+    claude_trusted "$dir"
+    case $? in
+      0) continue ;;
+      2) echo "gsd-lite: WARN $cfg not found — cannot verify that this workspace is trusted by Claude Code" >&2; continue ;;
+    esac
+    die "this workspace is not trusted by Claude Code ($cfg), so claude -p will ignore every permissions.allow entry in .claude/settings.json (unattended turns then stall on permission prompts).
+  対処（どちらか）: (a) このディレクトリで対話の ${dir:+CLAUDE_CONFIG_DIR=$dir }claude を一度起動して trust ダイアログを受け入れる（bypass モードで起動した場合はダイアログが出ないので (b)）
+              (b) claude を終了した状態で: jq --arg d \"$PWD\" '.projects[\$d].hasTrustDialogAccepted = true' $cfg > /tmp/claude.json && mv /tmp/claude.json $cfg
   この検証を飛ばすには GSD_LITE_CLAUDE_TRUST_CHECK=skip"
+  done < <(claude_config_dirs)
 }
 
-trust_summary() { # --status / --check 用の 1 行
-  claude_trusted
-  case $? in
-    0) echo "trust     : accepted (Claude Code allowlist active)" ;;
-    1) echo "trust     : NOT accepted — claude -p ignores .claude/settings.json allowlist (see --check)" ;;
-    *) echo "trust     : unknown ($(claude_config_file) not found)" ;;
-  esac
+trust_summary() { # --status / --check 用。設定フォルダごとに 1 行（Claude を使わなければ親環境の 1 行）
+  local dir dirs label
+  mapfile -t dirs < <(claude_config_dirs)
+  [ "${#dirs[@]}" -gt 0 ] || dirs=("")
+  for dir in "${dirs[@]}"; do
+    label=${dir:+ [config_dir: $dir]}
+    claude_trusted "$dir"
+    case $? in
+      0) echo "trust     : accepted (Claude Code allowlist active)$label" ;;
+      1) echo "trust     : NOT accepted — claude -p ignores .claude/settings.json allowlist (see --check)$label" ;;
+      *) echo "trust     : unknown ($(claude_config_file "$dir") not found)" ;;
+    esac
+  done
 }
 
 state_limit() { # state_limit <key> — state.json の limits.<key>（無い・空・不正な形なら空）
@@ -1256,6 +1364,7 @@ case "${1:-}" in
     exit 0 ;;
   --status) status; exit 0 ;;
   --where) command -v jq >/dev/null || die "jq is required"; where; exit 0 ;;
+  --providers) command -v jq >/dev/null || die "jq is required"; providers_report; exit 0 ;;
   --tokens) command -v jq >/dev/null || die "jq is required"; tokens_report; exit 0 ;;
   --watch) command -v jq >/dev/null || die "jq is required"; watch; exit 0 ;;
   --watch-once) command -v jq >/dev/null || die "jq is required"; require_state; watch_render; exit 0 ;;
@@ -1409,6 +1518,7 @@ while true; do
   # 起動中に編集されても壊れた値で走らせないよう、ターンごとに検証し直す
   token_var=
   provider=$(provider_for "$phase")
+  provider_fallback_warn "$phase"
   turn_limit_pattern=$LIMIT_PATTERN
   if [ -n "$provider" ]; then
     check_provider "$provider"
